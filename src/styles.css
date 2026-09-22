@@ -374,6 +374,33 @@ button {
 .msg-row.grouped .msg-avatar { visibility: hidden; }
 .msg-row.grouped .msg-sender { display: none; }
 
+/* ---------- "New messages" unread divider (#11) ---------- */
+/* WhatsApp-style: a full-width hairline with a centered pill, inserted by
+   renderMessages above the first unread post so it's obvious where the unread
+   part starts. Uses the same --unread accent as the sidebar badge. */
+.unread-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+}
+.unread-divider::before,
+.unread-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--unread);
+  opacity: 0.5;
+}
+.unread-pill {
+  flex: 0 0 auto;
+  background: var(--unread);
+  color: #fff;
+  font-size: 0.79rem;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+
 /* ---------- composer ---------- */
 .composer {
   display: flex;

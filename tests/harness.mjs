@@ -15,7 +15,8 @@
 // tag.cls, [attr="v"], [data-x="v"], :not(.cls), :checked, one-level
 // descendant), inputs' value/selection*/setSelectionRange, focus() tracking
 // document.activeElement, getBoundingClientRect() zeros, scrollTop/
-// scrollHeight numbers. Adapt the harness when the app changes, never the
+// scrollHeight numbers, and a no-op scrollIntoView that records the call.
+// Adapt the harness when the app changes, never the
 // other way around.
 
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -251,6 +252,9 @@ class FakeElement extends FakeNode {
   getAttribute(name) { return hasOwn(this.attrs, name) ? this.attrs[name] : null; }
   setSelectionRange(s, e) { this.selectionStart = s; this.selectionEnd = e; }
   getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
+  // Zero-size boxes can't really scroll; record the call so tests can assert
+  // the intent (like focus() parking document.activeElement).
+  scrollIntoView() { this.scrolledIntoView = true; }
   focus() { if (currentDoc) currentDoc.activeElement = this; this.focused = true; }
   blur() { this.focused = false; }
   click() { dispatch(this, "click"); }

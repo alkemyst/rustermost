@@ -112,6 +112,11 @@ const state = {
   // Unread conversation that was just opened: stays listed under Unread until
   // another conversation is opened, so it doesn't vanish from under the click.
   keptUnreadId: null,
+  // Unread count captured when a channel is opened, BEFORE markViewed zeroes
+  // the badge — anchors the "New messages" divider (#11) for as long as the
+  // channel stays open (repaints re-derive the divider from it). Replaced on
+  // every openChannel, so switching channels clears it.
+  unreadAtOpen: null, // { channelId, count } | null
   unread: {}, // channelId -> count
   dmNames: {}, // channelId -> name learned from a live sender (fallback)
   users: {}, // user_id -> user object { id, username, first_name, last_name, nickname }
@@ -859,6 +864,10 @@ async function openChannel(id) {
   cancelEdit(); // an edit never survives a channel switch
   histReset(); // nor does composer undo history — it belongs to the conversation (#18)
   state.activeId = id;
+  // #11: pin down where the unread part starts, before markViewed below wipes
+  // the count — renderMessages drops the "New messages" divider that many
+  // posts up from the bottom.
+  state.unreadAtOpen = (state.unread[id] || 0) > 0 ? { channelId: id, count: state.unread[id] } : null;
   if (id !== state.keptUnreadId) state.keptUnreadId = (state.unread[id] || 0) > 0 ? id : null;
   markViewed(id); // clears the badge locally, reports the read to the server
   renderSidebar();
@@ -965,8 +974,9 @@ async function loadOlder() {
 
     // Boundary pairing (#16): the previously-first bubble may now be the
     // continuation of the prepended page's last post — regroup it. The
-    // adjacency check keeps any separator sitting between the pages (loading
-    // placeholders …) from being treated as a grouping partner.
+    // adjacency check keeps any separator sitting between the pages (the #11
+    // unread divider, loading placeholders …) from being treated as a
+    // grouping partner.
     if (prevFirstRow && prevFirstRow.previousElementSibling === prevRow) {
       prevFirstRow.classList.toggle(
         "grouped",
@@ -994,15 +1004,48 @@ function renderMessages(posts) {
     messagesEl.appendChild(e);
     return;
   }
+  // Issue #11: the "New messages" divider goes before the first unread post.
+  // The count was captured at openChannel time (state.unreadAtOpen) and
+  // survives every repaint while the channel stays open, even though
+  // markViewed has zeroed the badge since. Anchored at the bottom end — the
+  // last `count` posts are the unread ones — so loadOlder prepends above
+  // never shift it; more unread than loaded posts → it sits on top (the pages
+  // in between were fetched but the boundary still marks "from here down").
+  const uo = state.unreadAtOpen;
+  const dividerAt =
+    uo && uo.channelId === state.activeId && uo.count > 0
+      ? Math.max(0, posts.length - uo.count)
+      : -1;
   let prevRow = null; // grouping is pairwise: row N compares with row N−1
-  for (const p of posts) {
+  let divider = null; // the #11 unread divider, when one is inserted
+  posts.forEach((p, i) => {
+    if (i === dividerAt) {
+      divider = unreadDividerEl();
+      messagesEl.appendChild(divider);
+      prevRow = null; // the divider visually breaks a same-author run
+    }
     const mine = state.me && p.user_id === state.me.id;
     const sender = mine ? null : realName(state.users[p.user_id]); // named once resolvable
     const grouped = shouldGroupWith(prevRow, p.user_id, p.create_at);
     prevRow = bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0, grouped });
     messagesEl.appendChild(prevRow);
-  }
-  scrollToBottom();
+  });
+  // Land on the unread boundary — that's what the user came to read — and
+  // only fall to the latest when there is nothing unread.
+  if (divider) divider.scrollIntoView({ block: "start" });
+  else scrollToBottom();
+}
+
+// WhatsApp-style "New messages" divider: a full-width hairline with a
+// centered pill (see styles.css). DOM nodes only, like everything else here.
+function unreadDividerEl() {
+  const el = document.createElement("div");
+  el.className = "unread-divider";
+  const pill = document.createElement("span");
+  pill.className = "unread-pill";
+  pill.textContent = "New messages";
+  el.appendChild(pill);
+  return el;
 }
 
 // ---------- message grouping (#16) ----------

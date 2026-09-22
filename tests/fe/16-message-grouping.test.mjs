@@ -13,8 +13,10 @@ import { boot, test, ok, eq } from "../harness.mjs";
 
 const ME = { id: "me1", username: "me", first_name: "Me", last_name: "" };
 const CHANNELS = [
-  // unread by one → pinned in the unfolded Unread section at boot
-  { id: "c1", name: "town-square", display_name: "Town Square", type: "O", team_id: "", total_msg_count: 200, member: { msg_count: 199 } },
+  // fully read, deliberately: an unread channel would pin a "New messages"
+  // divider (#11) before the latest posts, which is a legitimate group
+  // breaker — the grouping tests stay decoupled from it this way.
+  { id: "c1", name: "town-square", display_name: "Town Square", type: "O", team_id: "", total_msg_count: 200, member: { msg_count: 200 } },
 ];
 const USERS = {
   u2: { id: "u2", username: "anna", first_name: "Anna", last_name: "Doe" },
@@ -26,8 +28,13 @@ const MIN = 60 * 1000;
 const post = (id, uid, message, create_at) => ({ id, user_id: uid, channel_id: "c1", message, create_at });
 
 async function openC1(w) {
+  // A fully-read channel sits under Community → Other; unfold both levels.
+  w.fire(w.qa(".section-title").find((t) => t.textContent.includes("Community")), "click");
+  await w.flush();
+  w.fire(w.qa(".section-title").find((t) => t.textContent.includes("Other")), "click");
+  await w.flush();
   const row = w.qa(".channel-item").find((r) => r.textContent.includes("Town Square"));
-  ok(row, "Town Square row rendered (unread → pinned Unread section)");
+  ok(row, "Town Square row rendered after unfolding Community → Other");
   w.fire(row, "click");
   await w.flush();
 }
@@ -197,8 +204,11 @@ test("16: grouping holds in compact density too", async () => {
   await w.flush();
   eq(w.document.documentElement.dataset.density, "compact", "compact density applied to <html>");
 
-  // Re-open the channel for a full repaint under the new density.
-  await openC1(w);
+  // Re-open the channel for a full repaint under the new density (the
+  // sections stay unfolded from the first open — re-unfolding would fold).
+  const row = w.qa(".channel-item").find((r) => r.textContent.includes("Town Square"));
+  w.fire(row, "click");
+  await w.flush();
   ok(!isGrouped(w, "p1"), "run leader ungrouped under compact");
   ok(isGrouped(w, "p2"), "follow-up still groups under compact");
   ok(w.q(".msg-avatar", rowOf(w, "p2")), "gutter node still rendered under compact");
