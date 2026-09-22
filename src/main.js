@@ -1720,6 +1720,7 @@ composer.addEventListener("submit", (e) => {
 });
 composerInput.addEventListener("keydown", (e) => {
   if (handleEmojiPopupKey(e)) return; // popup swallows Enter/arrows while open
+  if (handleMentionPopupKey(e)) return; // same for the @mention popup (#21)
   if (e.key === "Escape" && state.editing) {
     e.preventDefault();
     cancelEdit(); // bail out of edit mode without saving
@@ -1740,8 +1741,9 @@ composerInput.addEventListener("keydown", (e) => {
 });
 composerInput.addEventListener("input", autoResize);
 composerInput.addEventListener("input", updateEmojiPopup);
+composerInput.addEventListener("input", updateMentionPopup);
 composerInput.addEventListener("input", histInput);
-composerInput.addEventListener("blur", () => setTimeout(hideEmojiPopup, 150)); // let clicks land first
+composerInput.addEventListener("blur", () => setTimeout(() => { hideEmojiPopup(); hideMentionPopup(); }, 150)); // let clicks land first
 
 // ---------- undo / redo (#18) ----------
 // WebKitGTK (and WKWebView/WebView2) give a textarea no usable native undo —
@@ -1823,6 +1825,7 @@ function histApply(snap) {
   composerHistory.lastType = null; // the next input breaks from the restored state
   autoResize();
   updateEmojiPopup(); // re-filter (or hide) against the restored text
+  updateMentionPopup();
 }
 
 function histUndo() {
@@ -1919,6 +1922,119 @@ function applyEmoji(cand) {
   composerInput.setSelectionRange(caret, caret);
   histSettle();
   hideEmojiPopup();
+  composerInput.focus();
+  autoResize();
+}
+
+// ---------- @mention autocomplete (#21) ----------
+// Mirrors the emoji autocomplete above, GitHub-style: typing "@al" lists known
+// users; ArrowUp/Down + Enter/Tab/click inserts "@username ". Candidates come
+// from state.users (filled by get_users_by_ids / search_users bookkeeping) and
+// match the prefix against the username OR first/last/nick name — insertion
+// always uses the username. The two autocompletes key on disjoint tokens
+// (":" vs "@"), so at most one popup ever has candidates.
+const MENTION_PREFIX_RE = /(^|\s)@([a-z0-9._-]{1,})$/i;
+const MENTION_MAX = 8;
+
+const mentionPopup = document.createElement("div");
+mentionPopup.className = "mention-popup hidden";
+composer.appendChild(mentionPopup);
+let mentionCands = [];
+let mentionSel = 0;
+
+function mentionCandidates(prefix) {
+  const p = prefix.toLowerCase();
+  const byUsername = [];
+  const byName = [];
+  const seen = new Set();
+  for (const u of Object.values(state.users)) {
+    if (!u || !u.username || seen.has(u.username)) continue;
+    if (state.me && u.id === state.me.id) continue; // mentioning myself is noise
+    seen.add(u.username);
+    const rec = { username: u.username, name: realName(u) };
+    if (u.username.toLowerCase().startsWith(p)) byUsername.push(rec);
+    else if (
+      (u.first_name || "").toLowerCase().startsWith(p)
+      || (u.last_name || "").toLowerCase().startsWith(p)
+      || (u.nickname || "").toLowerCase().startsWith(p)
+    ) byName.push(rec);
+  }
+  return byUsername.concat(byName).slice(0, MENTION_MAX);
+}
+
+function updateMentionPopup() {
+  const upToCaret = composerInput.value.slice(0, composerInput.selectionStart);
+  const m = upToCaret.match(MENTION_PREFIX_RE);
+  mentionCands = m ? mentionCandidates(m[2]) : [];
+  mentionSel = 0;
+  renderMentionPopup();
+}
+
+function mentionRowEl(u, selected) {
+  const row = document.createElement("div");
+  row.className = "mention-row" + (selected ? " sel" : "");
+  const un = document.createElement("span");
+  un.className = "un";
+  un.textContent = "@" + u.username;
+  row.appendChild(un);
+  if (u.name && u.name !== u.username) {
+    const rn = document.createElement("span");
+    rn.className = "rn";
+    rn.textContent = u.name;
+    row.appendChild(rn);
+  }
+  return row;
+}
+
+function renderMentionPopup() {
+  mentionPopup.innerHTML = "";
+  mentionPopup.classList.toggle("hidden", mentionCands.length === 0);
+  mentionCands.forEach((u, i) => {
+    const row = mentionRowEl(u, i === mentionSel);
+    // mousedown, not click: the composer must not lose the caret first.
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); applyMention(u); });
+    mentionPopup.appendChild(row);
+  });
+}
+
+function hideMentionPopup() {
+  mentionCands = [];
+  mentionPopup.classList.add("hidden");
+}
+
+// Returns true when the key was consumed by the popup.
+function handleMentionPopupKey(e) {
+  if (!mentionCands.length) return false;
+  if (e.key === "ArrowDown") {
+    mentionSel = (mentionSel + 1) % mentionCands.length;
+  } else if (e.key === "ArrowUp") {
+    mentionSel = (mentionSel + mentionCands.length - 1) % mentionCands.length;
+  } else if (e.key === "Enter" || e.key === "Tab") {
+    applyMention(mentionCands[mentionSel]);
+  } else if (e.key === "Escape") {
+    hideMentionPopup();
+  } else {
+    return false; // regular typing — let it through (input handler re-filters)
+  }
+  e.preventDefault();
+  renderMentionPopup();
+  return true;
+}
+
+function applyMention(u) {
+  const pos = composerInput.selectionStart;
+  const before = composerInput.value.slice(0, pos);
+  const after = composerInput.value.slice(pos);
+  const m = before.match(MENTION_PREFIX_RE);
+  if (!m) { hideMentionPopup(); return; }
+  const start = before.length - m[2].length - 1; // strip "@prefix"
+  const insert = "@" + u.username + " "; // trailing space: keep typing right away
+  histPush(); // one Ctrl+Z restores the typed "@prefix" (#18)
+  composerInput.value = before.slice(0, start) + insert + after;
+  const caret = start + insert.length;
+  composerInput.setSelectionRange(caret, caret);
+  histSettle();
+  hideMentionPopup();
   composerInput.focus();
   autoResize();
 }

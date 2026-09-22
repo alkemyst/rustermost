@@ -748,7 +748,7 @@ img.emoji {
   display: inline-block;
 }
 .composer { position: relative; }
-.emoji-popup {
+.emoji-popup, .mention-popup {
   position: absolute;
   bottom: 100%;
   left: 88px;
@@ -761,7 +761,7 @@ img.emoji {
   overflow: hidden;
   z-index: 50;
 }
-.emoji-row {
+.emoji-row, .mention-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -819,9 +819,11 @@ img.emoji {
   font-size: 0.93rem;
 }
 
-.emoji-row:hover { background: var(--bg-3); }
-.emoji-row.sel { background: var(--accent-dim); }
+.emoji-row:hover, .mention-row:hover { background: var(--bg-3); }
+.emoji-row.sel, .mention-row.sel { background: var(--accent-dim); }
 .emoji-row .glyph { width: 1.6em; text-align: center; font-size: 1.14rem; line-height: 1; }
+.mention-row .un { font-weight: 600; }
+.mention-row .rn { color: var(--text-faint); }
 
 /* ---------- reactions ---------- */
 .reactions {
