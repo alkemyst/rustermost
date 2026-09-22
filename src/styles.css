@@ -371,6 +371,51 @@ button {
 .composer button:hover { filter: brightness(1.1); }
 .composer button:active { transform: scale(0.94); }
 
+/* ---------- message editing ---------- */
+/* Small tag on the meta line of a message that was changed after posting. */
+.msg-edited {
+  font-style: italic;
+  color: var(--text-faint);
+  margin-left: 6px;
+}
+/* The bar shown above the composer while an edit is armed: accent spine on
+   the left, a small bold title over a one-line preview of the original text,
+   and the ✕ cancel on the right (WhatsApp look). */
+.edit-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 20px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+}
+.edit-bar-text { flex: 1; min-width: 0; }
+.edit-bar-title { font-size: 0.79rem; font-weight: 700; color: var(--accent); }
+.edit-bar-preview {
+  font-size: 0.86rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.edit-bar-cancel {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 1rem;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+.edit-bar-cancel:hover { background: var(--bg-2); color: var(--text); }
+/* Save failure: spans the full bar width under the preview. */
+.edit-bar-error {
+  flex-basis: 100%;
+  color: var(--danger);
+  font-size: 0.86rem;
+}
+
 /* ---------- compact density ---------- */
 /* Toggled by data-density on <html> (the "Message density" setting). Tightens
    padding/gaps and shrinks the avatar circles across messages, sidebar rows,

@@ -26,6 +26,8 @@
 //     Without them: a plain "📎 attachment" tag.
 //   - upload_file — the 📎 button and pasted images. Without it: an error chip,
 //     message text preserved.
+//   - edit_message — right-click editing of my own messages. Without it: the
+//     Edit item never shows / edits stay read-only.
 
 import { EMOJI } from "./emoji-data.js";
 
@@ -130,6 +132,8 @@ const state = {
   pageOldest: null, // id of the oldest post currently shown (paging cursor)
   pageMore: false, // might there be older posts to load?
   pageLoading: false, // a page load is in flight
+  editMessageEnabled: true, // flips off if edit_message isn't in the backend yet
+  editing: null, // { postId, original } while a message edit is in progress
 };
 
 const PAGE_SIZE = 30; // matches the backend's per_page
@@ -319,6 +323,7 @@ async function init() {
 
   // start listening BEFORE connecting so we don't miss events
   await listen("mm-post", onIncoming);
+  await listen("mm-post-edited", onPostEdited);
   await listen("mm-viewed", onViewedElsewhere);
   // Dormant until the WS loop forwards emoji_added: new custom emoji register live.
   await listen("mm-emoji-added", (ev) => {
@@ -748,6 +753,8 @@ function renderMuteBtn() {
 
 // ================= CONVERSATION =================
 async function openChannel(id) {
+  closeMsgMenu();
+  cancelEdit(); // an edit never survives a channel switch
   state.activeId = id;
   markViewed(id); // clears the badge locally, reports the read to the server
   renderSidebar();
@@ -838,7 +845,7 @@ async function loadOlder() {
     for (const p of older) {
       const mine = state.me && p.user_id === state.me.id;
       const sender = mine ? null : realName(state.users[p.user_id]);
-      frag.appendChild(bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions }));
+      frag.appendChild(bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0 }));
     }
     messagesEl.insertBefore(frag, messagesEl.firstChild);
     messagesEl.scrollTop += messagesEl.scrollHeight - prevH; // keep the view steady
@@ -867,7 +874,7 @@ function renderMessages(posts) {
     const mine = state.me && p.user_id === state.me.id;
     const sender = mine ? null : realName(state.users[p.user_id]); // named once resolvable
     messagesEl.appendChild(
-      bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions })
+      bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0 })
     );
   }
   scrollToBottom();
@@ -1353,19 +1360,25 @@ document.addEventListener("mousedown", (e) => {
   if (!channelMenu.classList.contains("hidden") && !channelMenu.contains(e.target)) {
     closeChannelMenu();
   }
+  if (!msgMenu.classList.contains("hidden") && !msgMenu.contains(e.target)) {
+    closeMsgMenu();
+  }
 });
 
 muteBtn.addEventListener("click", () => {
   if (state.activeId) toggleMuted(state.activeId);
 });
-// The menu is placed at a viewport position, so anything that moves the list
-// out from under it should dismiss it rather than let it float loose.
+// The menus are placed at a viewport position, so anything that moves the
+// content out from under them should dismiss them rather than let them float loose.
 channelList.addEventListener("scroll", closeChannelMenu);
 window.addEventListener("blur", closeChannelMenu);
+messagesEl.addEventListener("scroll", closeMsgMenu);
+window.addEventListener("blur", closeMsgMenu);
 
-function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions }) {
+function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edited }) {
   const row = document.createElement("div");
   row.className = "msg-row" + (mine ? " mine" : "");
+  if (postId) row.dataset.postId = postId; // how edits/locators find this bubble
   row.appendChild(avatarEl(uid, mine ? state.me?.username : sender));
 
   const el = document.createElement("div");
@@ -1375,6 +1388,7 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions }) {
     const meta = document.createElement("div");
     meta.className = "msg-meta";
     meta.textContent = (sender ? sender + " · " : "") + formatTime(ts);
+    if (edited) meta.appendChild(editedMarkerEl()); // history posts carrying edit_at
     el.appendChild(meta);
   }
   if (text) {
@@ -1395,6 +1409,14 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions }) {
   }
 
   row.appendChild(el);
+
+  // Right-click on my own bubble offers editing — only while the backend has
+  // the edit_message command (one not-found flips the flag off for the session).
+  row.addEventListener("contextmenu", (e) => {
+    if (!mine || !postId || !state.editMessageEnabled) return;
+    e.preventDefault();
+    openMsgMenu(e.clientX, e.clientY, postId, text || "");
+  });
   return row;
 }
 
@@ -1518,6 +1540,11 @@ composer.addEventListener("submit", (e) => {
 });
 composerInput.addEventListener("keydown", (e) => {
   if (handleEmojiPopupKey(e)) return; // popup swallows Enter/arrows while open
+  if (e.key === "Escape" && state.editing) {
+    e.preventDefault();
+    cancelEdit(); // bail out of edit mode without saving
+    return;
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendCurrent();
@@ -2026,6 +2053,37 @@ function readFileB64(file) {
 }
 
 async function sendCurrent() {
+  // Edit mode (right-click one of my bubbles → "✏️ Edit message") reroutes the
+  // composer: Enter now saves the edit instead of posting a new message.
+  if (state.editing) {
+    const { postId, original } = state.editing;
+    const newText = composerInput.value.trim();
+    if (newText === "") return; // empty is not a delete — stay in edit mode
+    if (newText === original) { cancelEdit(); return; } // no change → close quietly
+    sendBtn.disabled = true;
+    try {
+      await invoke("edit_message", { postId, message: newText });
+      // Optimistic repaint; the server's own echo arrives as "mm-post-edited"
+      // and applies the same (idempotent) update again.
+      // NB: attachments can't be edited — any staged pendingFiles stay staged.
+      applyEditToBubble(postId, newText);
+      cancelEdit();
+    } catch (e) {
+      if (/not found|unknown|no stub handler|not registered|not a valid command/i.test(String(e))) {
+        // Backend built before edit_message: fold the feature away silently.
+        state.editMessageEnabled = false;
+        cancelEdit();
+      } else {
+        // A real failure (network, permissions, …): keep edit mode and the text.
+        editBarError.textContent = String(e);
+        editBarError.classList.remove("hidden");
+      }
+    } finally {
+      sendBtn.disabled = false;
+    }
+    return;
+  }
+
   const text = composerInput.value.trim();
   const files = pendingFiles.slice();
   if ((!text && !files.length) || !state.activeId) return;
@@ -2092,6 +2150,146 @@ function ephemeralBubble(text) {
 function autoResize() {
   composerInput.style.height = "auto";
   composerInput.style.height = Math.min(composerInput.scrollHeight, 140) + "px";
+}
+
+// ================= MESSAGE EDITING =================
+// WhatsApp-style editing of my own messages: right-click a bubble → "✏️ Edit
+// message" arms edit mode — the bar above the composer shows the original
+// text, the composer holds it for editing, Enter/✔ saves (PUT via the
+// backend's edit_message) and ✕ / Esc / switching channel cancels. History
+// bubbles with edit_at > 0 and freshly edited ones carry an "edited" tag on
+// their meta line. Degrades silently when the backend lacks edit_message.
+
+// Right-click menu on a message bubble. Mirrors channelMenu: JS-created,
+// cursor-positioned, dismissed by any outside mousedown (see the closer above).
+const msgMenu = document.createElement("div");
+msgMenu.className = "context-menu hidden";
+document.body.appendChild(msgMenu);
+
+function openMsgMenu(x, y, postId, original) {
+  msgMenu.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = "context-menu-row";
+  row.textContent = "✏️  Edit message";
+  row.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    startEdit({ postId, original });
+    closeMsgMenu();
+  });
+  msgMenu.appendChild(row);
+
+  closeChannelMenu(); // one floating menu at a time
+  msgMenu.classList.remove("hidden");
+  const r = msgMenu.getBoundingClientRect(); // measurable now that it is shown
+  msgMenu.style.left = Math.max(8, Math.min(x, window.innerWidth - r.width - 8)) + "px";
+  msgMenu.style.top = Math.max(8, Math.min(y, window.innerHeight - r.height - 8)) + "px";
+}
+
+function closeMsgMenu() {
+  msgMenu.classList.add("hidden");
+}
+
+// The bar shown right above the composer while an edit is armed.
+const editBar = document.createElement("div");
+editBar.className = "edit-bar hidden";
+const editBarText = document.createElement("div");
+editBarText.className = "edit-bar-text";
+const editBarTitle = document.createElement("div");
+editBarTitle.className = "edit-bar-title";
+editBarTitle.textContent = "Edit message";
+const editBarPreview = document.createElement("div");
+editBarPreview.className = "edit-bar-preview";
+editBarText.appendChild(editBarTitle);
+editBarText.appendChild(editBarPreview);
+const editBarCancel = document.createElement("button");
+editBarCancel.type = "button";
+editBarCancel.className = "edit-bar-cancel";
+editBarCancel.title = "Cancel";
+editBarCancel.textContent = "✕";
+editBarCancel.addEventListener("click", cancelEdit);
+const editBarError = document.createElement("div");
+editBarError.className = "edit-bar-error hidden";
+editBar.appendChild(editBarText);
+editBar.appendChild(editBarCancel);
+editBar.appendChild(editBarError);
+composer.parentNode.insertBefore(editBar, composer); // sits right above the composer
+
+function startEdit({ postId, original }) {
+  state.editing = { postId, original };
+  editBarPreview.textContent = original;
+  editBarError.textContent = "";
+  editBarError.classList.add("hidden");
+  editBar.classList.remove("hidden");
+  composerInput.value = original;
+  autoResize();
+  composerInput.focus();
+  composerInput.setSelectionRange(original.length, original.length);
+  sendBtn.textContent = "✔";
+  sendBtn.title = "Save edit";
+}
+
+function cancelEdit() {
+  if (!state.editing) return; // nothing armed — leave the composer alone
+  state.editing = null;
+  editBar.classList.add("hidden");
+  editBarError.textContent = "";
+  editBarError.classList.add("hidden");
+  composerInput.value = "";
+  autoResize();
+  sendBtn.textContent = "➤";
+  sendBtn.title = "Send";
+}
+
+// The small "edited" tag on a bubble's meta line.
+function editedMarkerEl() {
+  const tag = document.createElement("span");
+  tag.className = "msg-edited";
+  tag.textContent = "edited";
+  return tag;
+}
+
+// Stamps the "edited" tag onto a rendered bubble; idempotent (the server
+// echoes our own edits back over the websocket).
+function markEdited(postId) {
+  const row = messagesEl.querySelector(`.msg-row[data-post-id="${CSS.escape(postId)}"]`);
+  if (!row) return false;
+  const meta = row.querySelector(".msg .msg-meta"); // bubbles always render a meta line; guard anyway
+  if (!meta || meta.querySelector(".msg-edited")) return false;
+  meta.appendChild(editedMarkerEl());
+  return true;
+}
+
+// Rewrites a rendered bubble's text in place (my own save + live mm-post-edited).
+function applyEditToBubble(postId, text) {
+  const row = messagesEl.querySelector(`.msg-row[data-post-id="${CSS.escape(postId)}"]`);
+  if (!row) return false;
+  const msg = row.querySelector(".msg");
+  if (!msg) return false;
+  let body = msg.querySelector(".msg-body");
+  if (!body && text) {
+    // A body-less bubble (attachment-only) gaining text: build the body
+    // directly after the meta line. In a real browser `childNodes` is a
+    // NodeList with no .indexOf — copy to an Array first.
+    body = document.createElement("div");
+    body.className = "msg-body";
+    const meta = msg.querySelector(".msg-meta");
+    const kids = Array.from(msg.childNodes);
+    const i = meta ? kids.indexOf(meta) + 1 : 0;
+    msg.insertBefore(body, kids[i] || null);
+  }
+  if (body) {
+    body.innerHTML = ""; // clear only — never assigns markup
+    body.appendChild(renderMarkdown(text)); // DOM nodes only, same as a fresh render
+  }
+  markEdited(postId);
+  return true;
+}
+
+// A message was edited (by me elsewhere, or by its author) — repaint in place.
+function onPostEdited(event) {
+  const p = event.payload; // { id, channel_id, message, edit_at }
+  if (!p || p.channel_id !== state.activeId) return;
+  applyEditToBubble(p.id, p.message || "");
 }
 
 // ================= NEW CONVERSATION MODAL =================

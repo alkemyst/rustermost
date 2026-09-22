@@ -267,6 +267,25 @@ pub async fn send_message(
 }
 
 #[tauri::command]
+pub async fn edit_message(
+    post_id: String,
+    message: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), AppError> {
+    let client = state.current_client()?;
+
+    let body = serde_json::json!({
+            "id": post_id,
+            "message": message,
+    }).to_string();
+
+    let _resp: serde_json::Value = client.query("PUT", &format!("posts/{post_id}"), None, Some(body.as_str())).await?;
+
+    Ok(())
+}
+
+
+#[tauri::command]
 pub async fn execute_command(
     channel_id: String,
     team_id: String,

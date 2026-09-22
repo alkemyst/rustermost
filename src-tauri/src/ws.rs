@@ -61,6 +61,21 @@ impl WebsocketHandler for WsHandler {
                     }
                 }
             }
+            WebsocketEventType::PostEdited => {
+                if let Some(post_str) = message.data["post"].as_str() {
+                    if let Ok(post) = serde_json::from_str::<serde_json::Value>(post_str) {
+                        let _ = self.app.emit(
+                            "mm-post-edited",
+                            serde_json::json!({
+                                "id": post["id"].as_str().unwrap_or(""),
+                                "channel_id": post["channel_id"].as_str().unwrap_or(""),
+                                "message": post["message"].as_str().unwrap_or(""),
+                                "edit_at": post["edit_at"].as_i64().unwrap_or(0),
+                            }),
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
