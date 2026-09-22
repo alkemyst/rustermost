@@ -141,6 +141,13 @@ const state = {
 
 const PAGE_SIZE = 30; // matches the backend's per_page
 
+// Issue #16: consecutive messages from the same author within a short window
+// collapse into a group — follow-up bubbles hide the repeated avatar (the
+// gutter stays, so the text keeps its alignment) and sender name, and pack
+// tighter (see .grouped in styles.css). 5 minutes mirrors the batching feel
+// of the native client and WhatsApp.
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
 // ---------- element refs ----------
 const $ = (id) => document.getElementById(id);
 // Own-property lookup that ignores Object.prototype — for tables indexed by
@@ -943,14 +950,29 @@ async function loadOlder() {
     if (state.activeId !== channelId) return;
 
     const prevH = messagesEl.scrollHeight;
+    const prevFirstRow = messagesEl.querySelector(".msg-row"); // boundary partner below
     const frag = document.createDocumentFragment();
+    let prevRow = null; // the page's top bubble has nothing above it yet
     for (const p of older) {
       const mine = state.me && p.user_id === state.me.id;
       const sender = mine ? null : realName(state.users[p.user_id]);
-      frag.appendChild(bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0 }));
+      const grouped = shouldGroupWith(prevRow, p.user_id, p.create_at);
+      prevRow = bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0, grouped });
+      frag.appendChild(prevRow);
     }
     messagesEl.insertBefore(frag, messagesEl.firstChild);
     messagesEl.scrollTop += messagesEl.scrollHeight - prevH; // keep the view steady
+
+    // Boundary pairing (#16): the previously-first bubble may now be the
+    // continuation of the prepended page's last post — regroup it. The
+    // adjacency check keeps any separator sitting between the pages (loading
+    // placeholders …) from being treated as a grouping partner.
+    if (prevFirstRow && prevFirstRow.previousElementSibling === prevRow) {
+      prevFirstRow.classList.toggle(
+        "grouped",
+        shouldGroupWith(prevRow, prevFirstRow.dataset.author, Number(prevFirstRow.dataset.ts))
+      );
+    }
 
     state.pageOldest = older[0].id;
     state.pageMore = older.length >= PAGE_SIZE;
@@ -972,14 +994,41 @@ function renderMessages(posts) {
     messagesEl.appendChild(e);
     return;
   }
+  let prevRow = null; // grouping is pairwise: row N compares with row N−1
   for (const p of posts) {
     const mine = state.me && p.user_id === state.me.id;
     const sender = mine ? null : realName(state.users[p.user_id]); // named once resolvable
-    messagesEl.appendChild(
-      bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0 })
-    );
+    const grouped = shouldGroupWith(prevRow, p.user_id, p.create_at);
+    prevRow = bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0, grouped });
+    messagesEl.appendChild(prevRow);
   }
   scrollToBottom();
+}
+
+// ---------- message grouping (#16) ----------
+// Is a new bubble a direct continuation of `prevRow` (the bubble rendered
+// right before it)? bubbleEl stamps every row with data-author / data-ts, so
+// the same helper serves the full repaint, live appends and the loadOlder
+// boundary fix-up. An unknown author (live event for a user we haven't
+// resolved yet) never groups — showing one header too many beats hiding one.
+function shouldGroupWith(prevRow, uid, ts) {
+  if (!prevRow || !uid || !ts) return false;
+  const prevTs = Number(prevRow.dataset.ts);
+  return prevRow.dataset.author === uid
+    && Number.isFinite(prevTs)
+    && ts - prevTs >= 0
+    && ts - prevTs < GROUP_WINDOW_MS;
+}
+
+// The last rendered message bubble, skipping any non-message trailing nodes
+// (ephemeral slash-command replies, the loadOlder spinner sit in the same
+// list but are never a grouping partner).
+function lastMsgRow() {
+  const kids = messagesEl.children;
+  for (let i = kids.length - 1; i >= 0; i--) {
+    if (kids[i].classList.contains("msg-row")) return kids[i];
+  }
+  return null;
 }
 
 // A round avatar for a user. Starts as a colored initial, then swaps to the
@@ -1555,10 +1604,16 @@ window.addEventListener("blur", closeChannelMenu);
 messagesEl.addEventListener("scroll", closeMsgMenu);
 window.addEventListener("blur", closeMsgMenu);
 
-function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edited }) {
+function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edited, grouped }) {
   const row = document.createElement("div");
-  row.className = "msg-row" + (mine ? " mine" : "");
+  row.className = "msg-row" + (mine ? " mine" : "") + (grouped ? " grouped" : "");
   if (postId) row.dataset.postId = postId; // how edits/locators find this bubble
+  // Grouping glue (#16): who sent this bubble and when. NB: deliberately NOT
+  // data-uid — that attribute signals "paint the avatar into this element"
+  // (see ensureAvatar), which a row must never be subject to.
+  if (uid) row.dataset.author = uid;
+  if (ts) row.dataset.ts = String(ts); // … and when
+
   row.appendChild(avatarEl(uid, mine ? state.me?.username : sender));
 
   const el = document.createElement("div");
@@ -1567,7 +1622,17 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edite
   if (sender || ts) {
     const meta = document.createElement("div");
     meta.className = "msg-meta";
-    meta.textContent = (sender ? sender + " · " : "") + formatTime(ts);
+    // The sender gets its own span so a grouped row can hide just it via CSS
+    // (.msg-row.grouped .msg-sender) while keeping the small timestamp —
+    // that way a bubble can flip in and out of a group (loadOlder boundary
+    // fix-up) without rebuilding any text.
+    if (sender) {
+      const who = document.createElement("span");
+      who.className = "msg-sender";
+      who.textContent = sender + " · ";
+      meta.appendChild(who);
+    }
+    meta.appendChild(document.createTextNode(formatTime(ts)));
     if (edited) meta.appendChild(editedMarkerEl()); // history posts carrying edit_at
     el.appendChild(meta);
   }
@@ -1696,8 +1761,11 @@ function onIncoming(event) {
     if (placeholder) placeholder.remove();
     // live events carry the username but not the user_id — resolve it if we can
     const uid = mine ? state.me?.id : state.usersByName[senderClean]?.id;
+    // A live bubble from the same author as the last one on screen joins its
+    // group (#16); a different author (or an unresolved sender) restarts it.
+    const grouped = shouldGroupWith(lastMsgRow(), uid, Date.now());
     messagesEl.appendChild(
-      bubbleEl({ mine, uid, sender: mine ? null : p.sender, text: p.message, ts: Date.now(), files: p.file_ids, postId: p.id })
+      bubbleEl({ mine, uid, sender: mine ? null : p.sender, text: p.message, ts: Date.now(), files: p.file_ids, postId: p.id, grouped })
     );
     scrollToBottom();
     if (document.hasFocus()) {
