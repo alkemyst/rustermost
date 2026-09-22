@@ -107,6 +107,9 @@ const state = {
   me: null, // { id, username, ... }
   channels: [], // from fetch_all_channels
   activeId: null,
+  // Unread conversation that was just opened: stays listed under Unread until
+  // another conversation is opened, so it doesn't vanish from under the click.
+  keptUnreadId: null,
   unread: {}, // channelId -> count
   dmNames: {}, // channelId -> name learned from a live sender (fallback)
   users: {}, // user_id -> user object { id, username, first_name, last_name, nickname }
@@ -538,7 +541,9 @@ function renderSidebar() {
 
   // Silenced conversations never reach the pinned Unread section — that is
   // the whole point of silencing them. They still show in their own section.
-  const unread = state.channels.filter((c) => (state.unread[c.id] || 0) > 0 && !isMuted(c.id) && match(c));
+  const unread = state.channels.filter(
+    (c) => ((state.unread[c.id] || 0) > 0 || c.id === state.keptUnreadId) && !isMuted(c.id) && match(c)
+  );
   const direct = state.channels.filter((c) => c.type === "D" && match(c));
   const groups = state.channels.filter((c) => c.type === "G" && match(c));
   const community = state.channels.filter((c) => (c.type === "O" || c.type === "P") && match(c));
@@ -749,6 +754,7 @@ function renderMuteBtn() {
 // ================= CONVERSATION =================
 async function openChannel(id) {
   state.activeId = id;
+  if (id !== state.keptUnreadId) state.keptUnreadId = (state.unread[id] || 0) > 0 ? id : null;
   markViewed(id); // clears the badge locally, reports the read to the server
   renderSidebar();
 
