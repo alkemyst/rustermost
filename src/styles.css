@@ -602,6 +602,30 @@ select.modal-input { appearance: none; cursor: pointer; }
   color: var(--text-dim);
 }
 .msg-body ul, .msg-body ol { margin: 4px 0; padding-left: 20px; }
+/* GFM pipe tables (#13): the wrapper carries the outer frame and scrolls
+   horizontally, so a wide table never breaks the bubble; its overflow clips
+   the table to the rounded corners. Inner grid lines come from the cells —
+   the last column/row drop theirs so nothing doubles up against the frame. */
+.msg-body .table-wrap {
+  overflow-x: auto;
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.msg-body .md-table { border-collapse: collapse; }
+.msg-body .md-table th, .msg-body .md-table td {
+  padding: 4px 12px;
+  text-align: left;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.msg-body .md-table tr > :last-child { border-right: 0; }
+.msg-body .md-table tbody tr:last-child > * { border-bottom: 0; }
+/* The header tint reuses --code-bg: a translucent wash that stays readable on
+   both bubble colors and in both themes. */
+.msg-body .md-table th { background: var(--code-bg); font-weight: 600; }
+.msg-body .md-table .align-center { text-align: center; }
+.msg-body .md-table .align-right { text-align: right; }
 
 /* ---------- outgoing attachments ---------- */
 .attach-btn {

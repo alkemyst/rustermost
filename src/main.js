@@ -1082,8 +1082,8 @@ function emojiNode(name) {
 // Minimal chat-flavored markdown, rendered by BUILDING DOM NODES — message
 // content never goes through innerHTML, so it can't inject markup. Supported:
 // [label](url), bare http(s) URLs, **bold**, *italic*/_italic_, ~~strike~~,
-// `code`, ``` fenced blocks ```, > quotes, -/*/1. lists. Everything else is
-// plain text.
+// `code`, ``` fenced blocks ```, > quotes, -/*/1. lists, GFM pipe tables.
+// Everything else is plain text.
 
 // Open in the system browser via the opener plugin; never navigate the webview.
 // Only http(s) may leave the app — the markdown regexes already guarantee that
@@ -1170,7 +1170,41 @@ const FENCE_RE = /^\s*```/;
 const QUOTE_RE = /^>\s?/;
 const UL_RE = /^\s*[-*]\s+/;
 const OL_RE = /^\s*\d+\.\s+/;
-const startsBlock = (line) => FENCE_RE.test(line) || QUOTE_RE.test(line) || UL_RE.test(line) || OL_RE.test(line);
+// One cell of a GFM table delimiter row: ≥3 dashes, optional alignment colons.
+const TABLE_DELIM_CELL_RE = /^:?-{3,}:?$/;
+
+// A table row's cells, trimmed; surrounding pipes are optional (| a | b | and
+// a | b both split to ["a", "b"]). Escaped pipes are out of scope on purpose.
+function splitTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+// If lines[i] opens a GFM pipe table — a pipe line sitting directly above a
+// |---|---| delimiter row — return { headers, aligns }, else null. Like
+// commonmark/GFM the delimiter must have exactly the header's cell count:
+// a mismatch (e.g. a "---" hr under a pipe-y line) stays plain text instead
+// of morphing into a mangled table.
+function tableStartAt(lines, i) {
+  if (i + 1 >= lines.length || !lines[i].includes("|")) return null;
+  const headers = splitTableRow(lines[i]);
+  const delims = splitTableRow(lines[i + 1]);
+  if (delims.length !== headers.length) return null;
+  if (!delims.every((c) => TABLE_DELIM_CELL_RE.test(c))) return null;
+  // :--- left, ---: right, :---: center, bare --- default (null → no class).
+  const aligns = delims.map((c) =>
+    c.startsWith(":") ? (c.endsWith(":") ? "center" : "left") : c.endsWith(":") ? "right" : null
+  );
+  return { headers, aligns };
+}
+
+// Detects block starts at lines[i]; tables need the lookahead (a header row
+// alone is just text — the delimiter line below is what makes it a table).
+const startsBlock = (lines, i) =>
+  FENCE_RE.test(lines[i]) || QUOTE_RE.test(lines[i]) || UL_RE.test(lines[i]) ||
+  OL_RE.test(lines[i]) || !!tableStartAt(lines, i);
 
 function renderMarkdown(text) {
   const frag = document.createDocumentFragment();
@@ -1218,9 +1252,53 @@ function renderMarkdown(text) {
       continue;
     }
 
+    const tbl = tableStartAt(lines, i);
+    if (tbl) {
+      // Semantic table in a scroller: wide tables scroll sideways instead of
+      // breaking the bubble. Cells run through inlineMd, so **x**, `y`, links
+      // and :emoji: keep working inside them.
+      const wrap = document.createElement("div");
+      wrap.className = "table-wrap";
+      const table = document.createElement("table");
+      table.className = "md-table";
+      const thead = document.createElement("thead");
+      const htr = document.createElement("tr");
+      tbl.headers.forEach((h, c) => {
+        const th = document.createElement("th");
+        if (tbl.aligns[c]) th.className = `align-${tbl.aligns[c]}`;
+        inlineMd(th, h);
+        htr.appendChild(th);
+      });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+      const tbody = document.createElement("tbody");
+      i += 2; // header + delimiter
+      // Body: consecutive pipe-lines. A line that starts another block (or a
+      // fresh table header — chat users stack tables without blank lines)
+      // ends it. Ragged rows are fine: short rows pad with empty cells,
+      // extra cells just append (commonmark-table leniency — don't crash).
+      while (i < lines.length && lines[i].includes("|") && !startsBlock(lines, i)) {
+        const cells = splitTableRow(lines[i]);
+        while (cells.length < tbl.headers.length) cells.push("");
+        const tr = document.createElement("tr");
+        cells.forEach((cell, c) => {
+          const td = document.createElement("td");
+          if (tbl.aligns[c]) td.className = `align-${tbl.aligns[c]}`;
+          inlineMd(td, cell);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+        i++;
+      }
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      frag.appendChild(wrap);
+      continue;
+    }
+
     inlineMd(frag, line);
     i++;
-    if (i < lines.length && !startsBlock(lines[i])) frag.appendChild(document.createElement("br"));
+    if (i < lines.length && !startsBlock(lines, i)) frag.appendChild(document.createElement("br"));
   }
   return frag;
 }
