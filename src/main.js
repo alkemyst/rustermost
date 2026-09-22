@@ -1436,7 +1436,6 @@ async function notify(title, body) {
 }
 
 const seenPostIds = new Set(); // dedupe guard (needs `id` on the WS payload)
-const recentSends = {}; // channelId -> when THIS window last sent there (to tell echo from other-device sends)
 
 function onIncoming(event) {
   const p = event.payload; // { channel_id, sender, message, id? }
@@ -1473,9 +1472,8 @@ function onIncoming(event) {
   // Wrapped so a notification hiccup can never block rendering the message —
   // an undefined helper here once silently ate all incoming messages.
   try {
-    // "mine" but not sent from this window = me on another device — worth a toast.
-    const isOwnEcho = mine && Date.now() - (recentSends[p.channel_id] || 0) < 7000;
-    if (!isOwnEcho && !isMuted(p.channel_id) && (!document.hasFocus() || p.channel_id !== state.activeId)) {
+    // Never notify for my own messages, no matter which device they came from.
+    if (!mine && !isMuted(p.channel_id) && (!document.hasFocus() || p.channel_id !== state.activeId)) {
       const su = state.usersByName[senderClean];
       const who = (su && realName(su)) || p.sender || "New message";
       const title = ch && !isDM(ch) ? `${who} · ${displayName(ch)}` : who;
@@ -1999,13 +1997,11 @@ async function sendCurrent() {
       const teamId = (ch && ch.team_id) || Object.keys(state.teams)[0] || "";
       try {
         const res = await invoke("execute_command", { channelId, teamId, command: text });
-        recentSends[channelId] = Date.now();
         // Ephemeral responses (visible only to me) come back directly.
         if (res && res.text) ephemeralBubble(res.text);
       } catch (e) {
         console.warn("execute_command unavailable — sent as plain message. Is it in generate_handler!?", e);
         await invoke("send_message", { channelId, message: text });
-        recentSends[channelId] = Date.now();
       }
       return;
     }
@@ -2019,7 +2015,6 @@ async function sendCurrent() {
     const args = { channelId, message: text };
     if (fileIds.length) args.fileIds = fileIds;
     await invoke("send_message", args);
-    recentSends[channelId] = Date.now(); // so the echo isn't mistaken for another device
     // The message echoes back via the "mm-post" event and is appended there,
     // so we don't render it manually here.
     pendingFiles.length = 0;
