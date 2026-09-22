@@ -861,6 +861,10 @@ async function openChannel(id) {
   chatTitle.textContent = displayName(ch);
   chatSub.textContent = subLabel(ch);
   renderMuteBtn();
+  // Opening a conversation hands focus straight to the composer (#17): search →
+  // click → type, with no extra click into the textbox. Done right away — the
+  // async loads below never touch focus, so nothing steals it back.
+  composerInput.focus();
   messagesEl.innerHTML = '<div class="loading">Loading messages…</div>';
 
   // reset paging for the newly opened conversation
@@ -2227,6 +2231,14 @@ function readFileB64(file) {
   });
 }
 
+// After a send triggered by clicking ➤, the button keeps the focus — hand it
+// back to the composer so the next message can be typed right away (#17).
+// Only then: an Enter-send never left the textarea, and if the user meanwhile
+// clicked into another control (e.g. search) we must not yank focus back.
+function refocusComposer() {
+  if (document.activeElement === sendBtn) composerInput.focus();
+}
+
 async function sendCurrent() {
   // Edit mode (right-click one of my bubbles → "✏️ Edit message") reroutes the
   // composer: Enter now saves the edit instead of posting a new message.
@@ -2255,6 +2267,7 @@ async function sendCurrent() {
       }
     } finally {
       sendBtn.disabled = false;
+      refocusComposer();
     }
     return;
   }
@@ -2303,6 +2316,7 @@ async function sendCurrent() {
     renderPendingFiles("Sending failed: " + e);
   } finally {
     sendBtn.disabled = false;
+    refocusComposer();
   }
 }
 
