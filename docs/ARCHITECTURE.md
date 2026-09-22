@@ -108,6 +108,7 @@ All commands are invoked from JavaScript via `invoke("<name>", { ...args })`. Ta
 | `view_channel` | `channelId` | `POST /channels/members/me/view`; marks a channel read on the server (clears badges on other devices too). |
 | `connect_websocket` | — | Spawns (replacing any previous instance) the background task that maintains the real-time WebSocket connection. |
 | `send_message` | `channelId`, `message`, `fileIds?` | `POST /api/v4/posts`; publishes a message, optionally with uploaded file attachments. |
+| `edit_message` | `postId`, `message` | `PUT /api/v4/posts/{id}`; edits the text of one of my messages. |
 | `get_posts` | `channelId`, `before?` | `GET /api/v4/channels/{id}/posts?per_page=30[&before=<id>]`; one page of history, oldest → newest. The `before` cursor drives infinite scroll (page size mirrored by `PAGE_SIZE` in `main.js`). When `before` is absent, the result is also written to the `chat/` snapshot. |
 | `get_cached_posts` | `channelId` | Returns the channel's disk snapshot as a raw JSON string (parsed on the JS side); rejects if none exists. |
 | `get_users_by_ids` | `ids` | `POST /api/v4/users/ids`; batch-resolves user ids to user objects (names for DMs and message authors). |
@@ -134,6 +135,7 @@ All commands are invoked from JavaScript via `invoke("<name>", { ...args })`. Ta
 1. **Auto-reconnect:** the spawned task wraps the connect call in an infinite loop — `connect_to_websocket` only returns when a connection *ends* (drop, error, or graceful close), so the task logs errors (graceful closes are silent), sleeps 5 s, and connects again. The crate's `ws-keep-alive` feature sends periodic pings so half-dead connections (e.g. after laptop sleep) fail fast instead of hanging silently.
 2. **Event handling:** `WsHandler::callback` matches on the typed event kind. Mattermost nests payloads as **JSON-encoded strings** inside the envelope (`data.post`, `data.reaction`), so handlers still perform an inner parse of that string.
    - `Posted` → emitted as `mm-post` with `IncomingMessage { id, file_ids, channel_id, sender, message }`. The post `id` powers the frontend's duplicate-delivery guard; `file_ids` lets attachments render live.
+   - `PostEdited` → emitted as `mm-post-edited` with `{ id, channel_id, message, edit_at }`. The frontend rewrites the rendered bubble in place and stamps its "edited" tag — idempotently, since the server also echoes our own edits.
    - `ReactionAdded` / `ReactionRemoved` → emitted as `mm-reaction-added` / `mm-reaction-removed` with a `Reaction { user_id, post_id, emoji_name }`, keeping reaction pills in sync across clients.
 
 The frontend subscribes with `window.__TAURI__.event.listen(...)`. This closes an elegant loop: a message you publish through `send_message` is echoed back to you by the server over this same WebSocket, so sent and received messages flow through one unified path into the UI. The frontend also listens for `mm-viewed` and `mm-emoji-added` — currently dormant hooks that light up if the WS loop is ever extended to forward `channel_viewed` / `emoji_added` events.
@@ -149,6 +151,7 @@ All endpoints are called against the session's `base_url` and authenticated with
 - `POST /api/v4/channels/members/me/view` — mark a channel viewed
 - `GET /api/v4/channels/{channel_id}/posts?per_page=30[&before=<post_id>]` — channel history (paged)
 - `POST /api/v4/posts` — publish a message (optionally with `file_ids`)
+- `PUT /api/v4/posts/{post_id}` — edit a message's text
 - `POST /api/v4/users/ids` / `POST /api/v4/users/search` — user resolution & search
 - `GET /api/v4/users/{user_id}/image` — avatar
 - `POST /api/v4/channels/direct|group` / `POST /api/v4/channels` — create conversations
