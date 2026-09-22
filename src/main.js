@@ -365,6 +365,8 @@ async function init() {
     renderSidebar();
     // Try to name the 1:1 DM partners (no-op until get_users_by_ids exists).
     resolveUsers(collectDmPartnerIds()).then(() => renderSidebar());
+    // Fire-and-forget: warm the DM disk snapshots in the background (#9).
+    prefetchDmCaches();
   } catch (e) {
     console.error("fetch_all_channels failed", e);
     channelList.innerHTML = '<div class="list-empty">Failed to load channels.</div>';
@@ -427,6 +429,80 @@ function renderMe() {
   const name = state.me?.username || "me";
   meName.textContent = "@" + name;
   decorateAvatar(meAvatar, state.me?.id, name);
+}
+
+// ================= DM POST-CACHE PREFETCH =================
+// Issue #9: openChannel paints instantly from the on-disk snapshot, but that
+// snapshot only exists for channels whose posts were fetched once before (the
+// Rust side rewrites it as a side effect of get_posts) — first-time-opened
+// DMs still showed "Loading messages…". So once the channel list is in, warm
+// the snapshot for the most relevant conversations in the background: a
+// fire-and-forget get_posts here is all it takes — no backend change, and no
+// repaint, sidebar re-render or notification either (the result is discarded,
+// the disk write happens server-side in the backend session).
+//
+// Gentle by design:
+//  - isDM covers 1:1 (D) and group (G) chats alike — both are the person
+//    conversations a user clicks expecting them to be instant, and the cap
+//    below keeps "G too" cheap. Named channels stay discoverable-on-demand.
+//  - PREFETCH_LIMIT is a hard cap on requests per launch: an account with
+//    hundreds of DMs warms only the 10 most-recently-active (activityOf, the
+//    sidebar's own ordering) — the ones actually likely to be clicked.
+//  - PREFETCH_CONCURRENCY workers at a time — a slow drip, never a burst.
+//  - Errors are swallowed: offline at boot must stay invisible.
+//
+// Re-run safe: an id is queued at most once per session (prefetchEnqueued),
+// and anything already opened/warmed is skipped at pop time — so a future
+// channel-list refresh can re-call prefetchDmCaches to warm brand-new
+// conversations without duplicating work for the rest.
+const PREFETCH_LIMIT = 10;
+const PREFETCH_CONCURRENCY = 2;
+const prefetchEnqueued = new Set(); // ids queued for warming this session
+const postFetches = new Map(); // channelId -> in-flight plain get_posts promise
+const postsWarmed = new Set(); // ids with a successful fetch this session (snapshot exists)
+
+// One in-flight plain get_posts per channel, shared between openChannel and
+// the background prefetch: whoever asks second joins the same promise instead
+// of duplicating the request. Success marks the channel warmed (the snapshot
+// write has happened on the Rust side), so the prefetch can skip it later;
+// failures leave postsWarmed untouched, so a later attempt retries normally.
+function fetchPostsOnce(channelId) {
+  let p = postFetches.get(channelId);
+  if (!p) {
+    p = invoke("get_posts", { channelId })
+      .then((posts) => { postsWarmed.add(channelId); return posts; })
+      .finally(() => postFetches.delete(channelId));
+    postFetches.set(channelId, p);
+  }
+  return p;
+}
+
+async function prefetchDmCaches() {
+  const pool = state.channels
+    .filter((ch) => isDM(ch) && !prefetchEnqueued.has(ch.id))
+    .sort((a, b) => activityOf(b) - activityOf(a))
+    .slice(0, PREFETCH_LIMIT)
+    .map((ch) => ch.id);
+  for (const id of pool) prefetchEnqueued.add(id);
+
+  // Shared cursor; each worker takes the next id until the pool is drained.
+  let next = 0;
+  const worker = async () => {
+    while (next < pool.length) {
+      const id = pool[next++];
+      // The user got here first: opening this channel already fetched (or is
+      // fetching) it, which wrote the same snapshot — never duplicate that.
+      if (postsWarmed.has(id) || postFetches.has(id)) continue;
+      try {
+        await fetchPostsOnce(id);
+      } catch (_) {
+        /* warming is invisible: offline or a server hiccup stays silent */
+      }
+    }
+  };
+  const workers = [];
+  for (let i = 0; i < Math.min(PREFETCH_CONCURRENCY, pool.length); i++) workers.push(worker());
+  await Promise.all(workers);
 }
 
 // ================= USER RESOLUTION =================
@@ -800,7 +876,9 @@ async function openChannel(id) {
   }
 
   try {
-    const posts = await invoke("get_posts", { channelId: id });
+    // fetchPostsOnce joins an in-flight background warm (or a rapid
+    // double-open) for this channel instead of firing a duplicate request.
+    const posts = await fetchPostsOnce(id);
     if (state.activeId !== id) return; // user switched away while loading
     freshPainted = true;
     renderMessages(posts);
