@@ -850,6 +850,7 @@ function renderMuteBtn() {
 async function openChannel(id) {
   closeMsgMenu();
   cancelEdit(); // an edit never survives a channel switch
+  histReset(); // nor does composer undo history — it belongs to the conversation (#18)
   state.activeId = id;
   if (id !== state.keptUnreadId) state.keptUnreadId = (state.unread[id] || 0) > 0 ? id : null;
   markViewed(id); // clears the badge locally, reports the read to the server
@@ -1724,6 +1725,14 @@ composerInput.addEventListener("keydown", (e) => {
     cancelEdit(); // bail out of edit mode without saving
     return;
   }
+  // The webview has no usable native textarea undo (#18) — our own history
+  // lives below. preventDefault unconditionally: the webview must never try
+  // its (broken) native undo behind our back.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && "zZyY".includes(e.key)) {
+    e.preventDefault();
+    if (e.shiftKey || e.key === "y" || e.key === "Y") histRedo(); else histUndo();
+    return;
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendCurrent();
@@ -1731,7 +1740,104 @@ composerInput.addEventListener("keydown", (e) => {
 });
 composerInput.addEventListener("input", autoResize);
 composerInput.addEventListener("input", updateEmojiPopup);
+composerInput.addEventListener("input", histInput);
 composerInput.addEventListener("blur", () => setTimeout(hideEmojiPopup, 150)); // let clicks land first
+
+// ---------- undo / redo (#18) ----------
+// WebKitGTK (and WKWebView/WebView2) give a textarea no usable native undo —
+// paste → Ctrl+Z did nothing. So the composer keeps its own bounded history of
+// {value, selectionStart, selectionEnd} snapshots.
+//
+// Step grouping: a run of same-kind inputs (typing, deleting) merges into ONE
+// step; a kind switch or a >HISTORY_IDLE_MS pause breaks it. Paste / drop /
+// cut are ALWAYS atomic — one Ctrl+Z removes exactly the paste, never more.
+// Rewrites the app performs itself (emoji insert, …) use the histPush() /
+// histSettle() bookends; histReset() wipes the stacks wherever the composer is
+// already reset (send, channel switch, edit arm/cancel) and re-bases onto the
+// content standing there at that moment.
+const HISTORY_MAX = 100;
+const HISTORY_IDLE_MS = 1000;
+const HISTORY_ATOMIC = new Set(["insertFromPaste", "insertFromDrop", "deleteByCut"]);
+
+const composerHistory = {
+  undo: [], // settled snapshots, oldest first — each is the state BEFORE a step
+  redo: [], // undone snapshots, newest last
+  pending: histSnap(), // state as of the last accounted change (= pre-state of the next input)
+  lastType: null, // inputType of the open burst (null = the next input breaks)
+  lastAt: 0, // when the open burst last moved
+};
+
+function histSnap() {
+  return { value: composerInput.value, s: composerInput.selectionStart, e: composerInput.selectionEnd };
+}
+
+function histPushStack(snap) {
+  composerHistory.undo.push(snap);
+  if (composerHistory.undo.length > HISTORY_MAX) composerHistory.undo.shift(); // drop the oldest
+}
+
+// input listener: decides the step boundaries around typed/pasted text.
+// NB: pending is always EAGER — snapshotted while the textarea still holds the
+// state it describes; an `input` event itself already fires post-mutation.
+function histInput(e) {
+  const h = composerHistory;
+  const now = Date.now();
+  const breaks = h.lastType === null
+    || (e.inputType && HISTORY_ATOMIC.has(e.inputType))
+    || e.inputType !== h.lastType
+    || now - h.lastAt > HISTORY_IDLE_MS;
+  if (breaks) histPushStack(h.pending);
+  h.redo.length = 0; // any new input kills the redo branch
+  h.lastType = e.inputType || null;
+  h.lastAt = now;
+  h.pending = histSnap();
+}
+
+// Bookends for rewrites the app performs itself (no input event fires there):
+// push the pre-rewrite state first, then re-base onto the rewritten content.
+function histPush() {
+  const h = composerHistory;
+  histPushStack(h.pending);
+  h.redo.length = 0;
+  h.lastType = null; // the next typed char starts a fresh step
+}
+
+function histSettle() {
+  composerHistory.pending = histSnap();
+  composerHistory.lastType = null;
+}
+
+// Forget everything (send, channel switch, edit arm/cancel): whatever is in
+// the box right now becomes the new base — no undo past this point.
+function histReset() {
+  composerHistory.undo.length = 0;
+  composerHistory.redo.length = 0;
+  composerHistory.pending = histSnap();
+  composerHistory.lastType = null;
+}
+
+function histApply(snap) {
+  composerInput.value = snap.value;
+  composerInput.setSelectionRange(snap.s, snap.e);
+  composerHistory.pending = histSnap();
+  composerHistory.lastType = null; // the next input breaks from the restored state
+  autoResize();
+  updateEmojiPopup(); // re-filter (or hide) against the restored text
+}
+
+function histUndo() {
+  const h = composerHistory;
+  if (!h.undo.length) return; // nothing to undo — already preventDefault'ed
+  h.redo.push(histSnap());
+  histApply(h.undo.pop());
+}
+
+function histRedo() {
+  const h = composerHistory;
+  if (!h.redo.length) return;
+  histPushStack(histSnap());
+  histApply(h.redo.pop());
+}
 
 // ---------- emoji autocomplete ----------
 // Typing ":na" in the composer suggests matching emoji; Enter/Tab/click inserts.
@@ -1807,9 +1913,11 @@ function applyEmoji(cand) {
   const start = before.length - m[2].length - 1; // strip ":prefix"
   // Unicode -> insert the character itself; custom -> keep the :name: code.
   const insert = cand.ch ? cand.ch + " " : `:${cand.name}: `;
+  histPush(); // one Ctrl+Z restores the typed ":prefix" (#18)
   composerInput.value = before.slice(0, start) + insert + after;
   const caret = start + insert.length;
   composerInput.setSelectionRange(caret, caret);
+  histSettle();
   hideEmojiPopup();
   composerInput.focus();
   autoResize();
@@ -1893,9 +2001,11 @@ function insertEmoji(c) {
   const pos = composerInput.selectionStart ?? composerInput.value.length;
   const before = composerInput.value.slice(0, pos);
   const after = composerInput.value.slice(pos);
+  histPush(); // picker inserts participate in composer undo (#18), one step each
   composerInput.value = before + insert + after;
   const caret = pos + insert.length;
   composerInput.setSelectionRange(caret, caret);
+  histSettle();
   autoResize();
   // Focus stays in the picker so several emoji can be picked in a row; Escape
   // or a click outside hands it back to the composer.
@@ -2278,6 +2388,7 @@ async function sendCurrent() {
   const channelId = state.activeId;
   composerInput.value = "";
   autoResize();
+  histReset(); // a sent draft must never come back through undo (#18)
   sendBtn.disabled = true;
   try {
     // Slash command: "/away", "/shrug lol", … → execute, don't post as text.
@@ -2313,6 +2424,7 @@ async function sendCurrent() {
     // put the text back and keep the files so nothing is lost
     composerInput.value = text;
     autoResize();
+    histReset(); // the rescued draft is the fresh base — no undo into the void
     renderPendingFiles("Sending failed: " + e);
   } finally {
     sendBtn.disabled = false;
@@ -2413,6 +2525,7 @@ function startEdit({ postId, original }) {
   autoResize();
   composerInput.focus();
   composerInput.setSelectionRange(original.length, original.length);
+  histReset(); // the edit draft is a fresh base — undo stays inside it (#18)
   sendBtn.textContent = "✔";
   sendBtn.title = "Save edit";
 }
@@ -2425,6 +2538,7 @@ function cancelEdit() {
   editBarError.classList.add("hidden");
   composerInput.value = "";
   autoResize();
+  histReset(); // leave no undo trail from the edit into the next draft
   sendBtn.textContent = "➤";
   sendBtn.title = "Send";
 }
