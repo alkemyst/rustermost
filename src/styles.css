@@ -197,8 +197,29 @@ button {
 }
 .icon-btn:hover { background: var(--accent); color: #fff; }
 .settings-btn { font-size: 1.14rem; }
-.search-wrap { padding: 12px; }
-.search-wrap input { width: 100%; }
+.search-wrap { padding: 12px; position: relative; }
+.search-wrap input { width: 100%; padding-right: 34px; } /* room for the ✕ */
+/* Round ✕ clear button overlaid at the field's right edge (a small icon-btn);
+   main.js shows it only while the field has text (the .hidden class toggles). */
+.search-clear {
+  position: absolute;
+  top: 50%;
+  right: 20px; /* 12px wrap padding + 8px inside the field's right edge */
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 0.79rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.search-clear:hover { background: var(--accent); color: #fff; }
 
 .channel-list { flex: 1; overflow-y: auto; padding-bottom: 12px; }
 .section-title {

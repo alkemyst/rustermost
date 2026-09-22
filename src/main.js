@@ -154,6 +154,7 @@ const loginStatus = $("login-status");
 const meAvatar = $("me-avatar");
 const meName = $("me-name");
 const searchInput = $("search-input");
+const searchClearBtn = $("search-clear-btn");
 const channelList = $("channel-list");
 const emptyState = $("empty-state");
 const chatPanel = $("chat-panel");
@@ -560,6 +561,14 @@ async function resolveUsers(ids) {
 // ================= SIDEBAR =================
 searchInput.addEventListener("input", renderSidebar);
 
+// Round ✕ overlaid on the field's right edge: clears the text, re-runs the
+// exact same filter path as typing, and hands focus back to the input.
+searchClearBtn.addEventListener("click", () => {
+  searchInput.value = "";
+  renderSidebar();
+  searchInput.focus();
+});
+
 function displayName(ch) {
   if (ch.display_name && ch.display_name.trim()) return ch.display_name;
   if (ch.type === "D") {
@@ -618,6 +627,11 @@ function activityOf(ch) {
 
 function renderSidebar() {
   const q = (searchInput.value || "").toLowerCase();
+  // The ✕ is shown exactly when there is text to clear. Syncing here —
+  // instead of only in the input/click listeners — means every render path
+  // (typing, the button itself, live-event refreshes, any future code that
+  // sets searchInput.value) keeps the icon in agreement with the field.
+  searchClearBtn.classList.toggle("hidden", !q);
   const match = (ch) => searchText(ch).includes(q);
 
   // Silenced conversations never reach the pinned Unread section — that is
