@@ -26,6 +26,7 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 base64 = "0.23.1"
 tauri-plugin-notification = "2"
+tauri-plugin-clipboard-manager = "2"
 mattermost_api = { version = "0.8.2", features = ["ws-keep-alive"] }
 async-trait = "0.1.92"
 

@@ -1899,21 +1899,63 @@ fileInput.addEventListener("change", () => {
   renderPendingFiles();
 });
 
-// Paste an image (screenshot) straight into the composer.
-composerInput.addEventListener("paste", (e) => {
-  const items = e.clipboardData ? e.clipboardData.items : [];
+// Paste images/files anywhere in the window → queue them as attachments for
+// the open conversation (like the native client). Text pastes pass through.
+// Document-level so this also works when the composer isn't focused, and with
+// a files fallback for webviews that don't expose pasted images via items.
+// WebKitGTK (Linux) fires paste with a completely EMPTY DataTransfer — in that
+// case the clipboard image is read directly from the OS via the
+// clipboard-manager plugin (see queueClipboardImage).
+document.addEventListener("paste", (e) => {
+  if (!state.activeId) return;
+  const cd = e.clipboardData;
   let got = false;
-  for (const it of items) {
-    if (it.kind === "file") {
-      const f = it.getAsFile();
-      if (f) { pendingFiles.push(f); got = true; }
+  if (cd) {
+    for (const it of Array.from(cd.items || [])) {
+      if (it.kind === "file") {
+        const f = it.getAsFile();
+        if (f) { pendingFiles.push(f); got = true; }
+      }
+    }
+    if (!got && cd.files && cd.files.length) {
+      for (const f of Array.from(cd.files)) { pendingFiles.push(f); got = true; }
     }
   }
   if (got) {
     e.preventDefault();
     renderPendingFiles();
+    composerInput.focus();
+  } else if (!cd || !(cd.items && cd.items.length)) {
+    // Empty DataTransfer: either the clipboard holds no image, or the webview
+    // hid it — ask the OS clipboard for an image just in case.
+    queueClipboardImage();
   }
 });
+
+// Reads an image straight from the OS clipboard (bypasses the webview, which
+// hides clipboard contents from us) and queues it as a PNG attachment.
+async function queueClipboardImage() {
+  try {
+    const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
+    if (!cm || !cm.readImage) return;
+    const img = await cm.readImage();
+    const { width, height } = await img.size();
+    if (!width || !height) return;
+    const rgba = new Uint8ClampedArray(await img.rgba());
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+    if (!blob) return;
+    pendingFiles.push(new File([blob], `pasted-${Date.now()}.png`, { type: "image/png" }));
+    renderPendingFiles();
+    composerInput.focus();
+  } catch (e) {
+    // No image on the clipboard (e.g. a text paste) — the plugin throws.
+    console.warn("[paste] no clipboard image:", e);
+  }
+}
 
 function renderPendingFiles(errorText) {
   pendingFilesEl.innerHTML = "";
