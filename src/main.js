@@ -1256,6 +1256,15 @@ async function toggleReaction(postId, name) {
   }
 }
 
+// "Alice, Bob and you reacted with :thumbsup:" — "you" last, unresolved users as "someone".
+function reactorsTitle(users, name) {
+  const my = state.me?.id;
+  const names = [...users].filter((id) => id !== my).map((id) => realName(state.users[id]) || "someone");
+  if (my && users.has(my)) names.push("you");
+  const who = names.length > 1 ? names.slice(0, -1).join(", ") + " and " + names[names.length - 1] : names[0];
+  return `${who.charAt(0).toUpperCase() + who.slice(1)} reacted with :${name}:`;
+}
+
 function renderReactionsInto(container, postId) {
   container.innerHTML = "";
   const map = state.reactions[postId] || {};
@@ -1265,7 +1274,13 @@ function renderReactionsInto(container, postId) {
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = "reaction-pill" + (my && users.has(my) ? " mine" : "");
-    pill.title = `:${name}:`;
+    // Tooltip names who reacted. Built on hover so it reflects users resolved
+    // since render; unknown authors are fetched and the tooltip refreshed.
+    pill.title = reactorsTitle(users, name);
+    pill.addEventListener("mouseenter", () => {
+      pill.title = reactorsTitle(users, name);
+      resolveUsers([...users]).then(() => { pill.title = reactorsTitle(users, name); });
+    });
     pill.appendChild(emojiNode(name) || document.createTextNode(`:${name}:`));
     const cnt = document.createElement("span");
     cnt.className = "count";
