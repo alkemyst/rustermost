@@ -45,7 +45,25 @@ test("boot → unread DM in sidebar → open conversation → marked read", asyn
   eq(w.el("chat-title").textContent, "Anna Doe", "chat title shows the partner's real name");
 
   ok(!w.q(".badge", list), "badge cleared after opening (optimistic mark-read)");
-  ok(!titles().some((t) => t.includes("Unread")), "Unread section disappears once empty");
+  // #26: the just-opened conversation stays listed under Unread (badge-less)
+  // until another conversation is opened, so it doesn't vanish under the click.
+  ok(titles().some((t) => t.includes("Unread · 1")), "opened conversation remains in the Unread section (#26)");
+
+  // Open another conversation → the kept pin releases and the section empties.
+  // (Community renders per-team sub-groups; both levels fold independently.)
+  const communityTitle = w.qa(".section-title", list).find((t) => t.textContent.includes("Community"));
+  ok(communityTitle, "Community section header rendered");
+  w.fire(communityTitle, "click");
+  await w.flush();
+  const otherTeamTitle = w.qa(".section-title", list).find((t) => t.textContent.includes("Other"));
+  ok(otherTeamTitle, "team sub-group rendered inside Community");
+  w.fire(otherTeamTitle, "click");
+  await w.flush();
+  const c1Row = w.qa(".channel-item", list).find((r) => r.textContent.includes("Town Square"));
+  ok(c1Row, "Town Square row rendered after unfolding Community");
+  w.fire(c1Row, "click");
+  await w.flush();
+  ok(!titles().some((t) => t.includes("Unread")), "Unread section disappears once another conversation is open");
 
   ok(w.invoked("get_posts").some((c) => c.args.channelId === "c2"), "history fetched for the opened channel");
   ok(w.invoked("view_channel").some((c) => c.args.channelId === "c2"), "server told we read the channel");
