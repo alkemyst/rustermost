@@ -1536,6 +1536,58 @@ async function toggleReaction(postId, name) {
   }
 }
 
+// Names listed in a reaction hovercard before the rest collapses into
+// "and N more".
+const REACTION_TIP_MAX = 10;
+
+// GitHub-style hovercard text for a reaction chip: who reacted, "You" first
+// (WhatsApp-style), everyone else in reaction order. Users we haven't
+// resolved yet degrade to "someone" (never a raw id, never "undefined") and
+// the text updates once resolveUsers brings their names in.
+function reactionTipText(postId, name) {
+  const set = state.reactions[postId] && state.reactions[postId][name];
+  if (!set || !set.size) return `:${name}:`;
+  const my = state.me?.id;
+  const ids = [...set];
+  if (my && set.has(my)) {
+    ids.splice(ids.indexOf(my), 1);
+    ids.unshift(my);
+  }
+  const shown = ids.slice(0, REACTION_TIP_MAX).map((id) =>
+    id === my ? "You" : realName(state.users[id]) || "someone"
+  );
+  const extra = ids.length - shown.length;
+  let names = shown.join(", ");
+  if (extra > 0) names += ` and ${extra} more`;
+  else if (shown.length > 1) names = shown.slice(0, -1).join(", ") + " and " + shown[shown.length - 1];
+  return `${names} reacted with :${name}:`;
+}
+
+// Hovercard for a reaction chip: a plain child div of the pill, so it dies
+// with the pill on every renderReactionsInto rebuild — nothing can leak
+// across re-renders. Resolution of unknown reactor names refreshes it in
+// place, but only while this exact hover is still alive.
+function showReactionTip(pill, postId, name) {
+  let tip = pill.querySelector(".reaction-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.className = "reaction-tip";
+    pill.appendChild(tip);
+  }
+  tip.textContent = reactionTipText(postId, name);
+  const unknown = [...(state.reactions[postId]?.[name] || [])].filter((id) => !state.users[id]);
+  if (unknown.length) {
+    resolveUsers(unknown).then(() => {
+      if (tip.parentNode === pill) tip.textContent = reactionTipText(postId, name);
+    });
+  }
+}
+
+function hideReactionTip(pill) {
+  const tip = pill.querySelector(".reaction-tip");
+  if (tip) tip.remove();
+}
+
 function renderReactionsInto(container, postId) {
   container.innerHTML = "";
   const map = state.reactions[postId] || {};
@@ -1545,13 +1597,14 @@ function renderReactionsInto(container, postId) {
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = "reaction-pill" + (my && users.has(my) ? " mine" : "");
-    pill.title = `:${name}:`;
     pill.appendChild(emojiNode(name) || document.createTextNode(`:${name}:`));
     const cnt = document.createElement("span");
     cnt.className = "count";
     cnt.textContent = users.size;
     pill.appendChild(cnt);
     pill.addEventListener("click", () => toggleReaction(postId, name));
+    pill.addEventListener("mouseenter", () => showReactionTip(pill, postId, name));
+    pill.addEventListener("mouseleave", () => hideReactionTip(pill));
     container.appendChild(pill);
   }
   const add = document.createElement("button");

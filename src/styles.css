@@ -872,6 +872,7 @@ img.emoji {
   margin-top: 6px;
 }
 .reaction-pill {
+  position: relative; /* anchor for the .reaction-tip hovercard */
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -890,6 +891,27 @@ img.emoji {
 }
 .reaction-pill .count { font-size: 0.79rem; color: var(--text-dim); }
 .reaction-pill.mine .count { color: var(--text); }
+/* who-reacted hovercard, floating above its chip */
+.reaction-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 240px;
+  padding: 5px 9px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  text-align: center;
+  white-space: normal;
+  pointer-events: none; /* purely informational — never steals the hover */
+  z-index: 70;
+}
 .reaction-add {
   background: transparent;
   border: 1px dashed var(--border);
