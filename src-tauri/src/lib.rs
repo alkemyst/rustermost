@@ -9,6 +9,9 @@ use ws::*;
 mod media;
 use media::*;
 
+mod notify;
+use notify::*;
+
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -101,7 +104,8 @@ pub fn run() {
             remove_reaction,
             execute_command,
             get_cached_posts,
-            restore_session
+            restore_session,
+            show_notification
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

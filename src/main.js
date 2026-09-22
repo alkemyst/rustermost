@@ -334,6 +334,11 @@ async function init() {
     const r = ev.payload || {};
     if (r.post_id && r.emoji_name && r.user_id) applyReaction(r.post_id, r.emoji_name, r.user_id, false);
   });
+  // A desktop notification was clicked: the backend already raised the window.
+  await listen("mm-notification-clicked", (ev) => {
+    const id = ev.payload;
+    if (state.channels.some((c) => c.id === id)) openChannel(id);
+  });
   try {
     await invoke("connect_websocket");
   } catch (e) {
@@ -1413,7 +1418,18 @@ function formatTime(ts) {
 // ================= LIVE EVENTS =================
 // Desktop notification via the Tauri notification plugin. No-op (and silent)
 // until the plugin is registered on the Rust side, so it never errors early.
-async function notify(title, body) {
+async function notify(title, body, channelId) {
+  // Linux: clickable notification from the backend (click opens the
+  // conversation, see "mm-notification-clicked"). Elsewhere, or if the command
+  // is missing, fall back to the plugin's fire-and-forget notification.
+  if (IS_LINUX && channelId) {
+    try {
+      await invoke("show_notification", { title, body: body || "", channelId });
+      return;
+    } catch (e) {
+      console.warn("[notify] show_notification unavailable, using the plugin:", e);
+    }
+  }
   try {
     const n = window.__TAURI__ && window.__TAURI__.notification;
     if (!n) { console.warn("[notify] plugin API not present on window.__TAURI__"); return; }
@@ -1479,7 +1495,7 @@ function onIncoming(event) {
       const title = ch && !isDM(ch) ? `${who} · ${displayName(ch)}` : who;
       const nFiles = p.file_ids ? p.file_ids.length : 0;
       const body = p.message || (nFiles ? (nFiles === 1 ? "📎 Sent an attachment" : `📎 Sent ${nFiles} attachments`) : "");
-      notify(title, body);
+      notify(title, body, p.channel_id);
     }
   } catch (e) {
     console.error("notification failed (message still rendered)", e);
