@@ -10,7 +10,7 @@ A lightweight, WhatsApp-style alternative desktop client for Mattermost.
 
 ## How this was built
 
-This project has a deliberate division of labor: the **Rust backend** (`src-tauri/`) is hand-written by me as a learning exercise — while exploring Rust, under some guidance by various LLMs. The **frontend** (`src/`, vanilla JavaScript) is the mirror image: it's programmed by AI assistants — started by [Claude](https://claude.com/claude-code), continued by [Kimi](https://www.kimi.com/) (via OpenCode). Keep that in mind when reading the code — the backend optimizes for learning clarity, the frontend for getting a UI built around it.
+This project has a deliberate division of labor: the **Rust backend** (`src-tauri/`) is hand-written by me as a learning exercise — while exploring Rust, under some guidance by various LLMs. The **frontend** (`src/`, vanilla JavaScript) is the mirror image: it's programmed by AI assistants — started by Claude Opus via [Claude Code](https://claude.com/claude-code), continued by [Kimi](https://www.kimi.com/) via OpenCode. Keep that in mind when reading the code — the backend optimizes for learning clarity, the frontend for getting a UI built around it.
 
 ## Overview
 
