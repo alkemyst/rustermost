@@ -45,6 +45,8 @@ pub struct Post {
     pub user_id: String,
     pub create_at: i64,
     #[serde(default)]
+    pub edit_at: i64,
+    #[serde(default)]
     pub file_ids: Option<Vec<String>>,
     #[serde(default)]
     pub metadata: PostMetadata,

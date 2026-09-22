@@ -101,7 +101,8 @@ pub fn run() {
             remove_reaction,
             execute_command,
             get_cached_posts,
-            restore_session
+            restore_session,
+            edit_message
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
