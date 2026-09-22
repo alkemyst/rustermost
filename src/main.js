@@ -2,6 +2,8 @@
 //
 // Talks ONLY to registered Tauri commands (see generate_handler! in
 // src-tauri/src/lib.rs) plus the "mm-*" events from the WebSocket task.
+// Also uses Tauri core JS APIs: window (close interception), tray, menu and
+// image for the Linux close-to-tray behavior (see the TRAY section below).
 //
 // Display settings (font size / theme / density) are frontend-only: saved in
 // localStorage and applied as a CSS variable + data-attributes on <html>.
@@ -29,6 +31,76 @@ import { EMOJI } from "./emoji-data.js";
 
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
+
+// ================= TRAY / CLOSE-TO-TRAY (Linux) =================
+// Linux has no backend close handler (the hide-on-close in lib.rs is
+// macOS-only; on Windows closing quits, which stays). Without this, closing
+// the window kills the app — see issue #10. So on Linux we hide the main
+// window instead and offer a tray icon with Show / Quit.
+// Degrades gracefully: if the backend was built without the `tray-icon`
+// feature or the window permissions (core:window:allow-hide/-show/-set-focus/
+// -unminimize/-destroy), we warn once and keep the plain close-quits behavior.
+const IS_LINUX = /linux/i.test(navigator.userAgent);
+
+// TrayIcon icons via the always-allowed `plugin:image|new`, which takes raw
+// RGBA bytes + dimensions (unlike from_bytes, which needs the image/png
+// cargo feature enabled) — so we decode the PNG through a canvas.
+async function rgbaFromPng(url) {
+  const blob = await (await fetch(url)).blob();
+  const bmp = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bmp, 0, 0);
+  return {
+    rgba: new Uint8Array(ctx.getImageData(0, 0, bmp.width, bmp.height).data.buffer),
+    width: bmp.width,
+    height: bmp.height,
+  };
+}
+
+async function setupTray() {
+  const T = window.__TAURI__;
+  const win = T.window.getCurrentWindow();
+  const showWindow = async () => {
+    await win.unminimize(); // no-op unless minimized
+    await win.show();
+    await win.setFocus();
+  };
+  const quitApp = async () => {
+    // Destroy every window (main + any SSO window left open); Tauri exits
+    // once the last one is gone. destroy() skips close-requested listeners.
+    for (const w of await T.window.getAllWindows()) await w.destroy();
+  };
+  const menu = await T.menu.Menu.new({
+    items: [
+      await T.menu.MenuItem.new({ id: "tray-show", text: "Show rustermost", action: showWindow }),
+      await T.menu.MenuItem.new({ id: "tray-quit", text: "Quit", action: quitApp }),
+    ],
+  });
+  const icon = await rgbaFromPng("favicon.png");
+  await T.tray.TrayIcon.new({
+    id: "main",
+    icon: await T.image.Image.new(icon.rgba, icon.width, icon.height),
+    tooltip: "rustermost",
+    menu, // right-click (or any click on Ubuntu's appindicator ext) shows this
+    // NOTE: on Linux (libappindicator) Tauri delivers NO click events, so
+    // this action never fires there today — left-clicking our icon is dead
+    // by upstream design. Kept for the day Tauri wires Linux tray events.
+    action: (ev) => {
+      if (ev.type === "Click" && ev.button === "Left" && ev.buttonState === "Down") showWindow();
+    },
+  });
+  await win.onCloseRequested((e) => {
+    e.preventDefault(); // intercept first, then hide
+    win.hide();
+  });
+}
+
+if (IS_LINUX) {
+  setupTray().catch((e) => console.warn("[tray] unavailable, keeping close-quits behavior:", e));
+}
 
 const state = {
   baseUrl: "",
