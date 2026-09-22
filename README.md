@@ -134,7 +134,13 @@ Testers just need the URL of a Mattermost server they can reach and their SSO cr
 
 ## Tests
 
-There are **no tests yet**. This repository began as a Rust-learning project, and the priority so far has been building features while learning the language — a deliberate trade-off, not an oversight. **Tests are the next step**: the plan is to extract the pure logic (channel grouping and de-duplication, unread computation, markdown parsing, emoji resolution) into functions testable on both the Rust and JavaScript sides.
+The **frontend now has a test suite** — a dependency-free Node harness (`tests/harness.mjs`): a fake DOM plus a stubbed `window.__TAURI__` bridge boots the real `src/main.js` in Node, so tests drive the app end to end — canned channels, sidebar clicks, fake WebSocket events — without a webview. Run it with:
+
+```sh
+node tests/run.mjs
+```
+
+Convention: each frontend fix or feature ships with its own `tests/fe/<issue>-<slug>.test.mjs`. The **Rust side is still untested**: this repository began as a Rust-learning project, and covering the backend (channel grouping, unread computation, …) remains the next step — a deliberate trade-off, not an oversight.
 
 ## Documentation
 
