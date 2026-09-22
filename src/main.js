@@ -758,6 +758,7 @@ async function openChannel(id) {
   chatTitle.textContent = displayName(ch);
   chatSub.textContent = subLabel(ch);
   renderMuteBtn();
+  composerInput.focus(); // ready to type right after picking a conversation
   messagesEl.innerHTML = '<div class="loading">Loading messages…</div>';
 
   // reset paging for the newly opened conversation
