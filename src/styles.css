@@ -197,8 +197,29 @@ button {
 }
 .icon-btn:hover { background: var(--accent); color: #fff; }
 .settings-btn { font-size: 1.14rem; }
-.search-wrap { padding: 12px; }
-.search-wrap input { width: 100%; }
+.search-wrap { padding: 12px; position: relative; }
+.search-wrap input { width: 100%; padding-right: 34px; } /* room for the ✕ */
+/* Round ✕ clear button overlaid at the field's right edge (a small icon-btn);
+   main.js shows it only while the field has text (the .hidden class toggles). */
+.search-clear {
+  position: absolute;
+  top: 50%;
+  right: 20px; /* 12px wrap padding + 8px inside the field's right edge */
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--bg-3);
+  color: var(--text-dim);
+  font-size: 0.79rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.search-clear:hover { background: var(--accent); color: #fff; }
 
 .channel-list { flex: 1; overflow-y: auto; padding-bottom: 12px; }
 .section-title {
@@ -342,6 +363,44 @@ button {
 .msg-other .msg-body { background: var(--bubble-other); border-bottom-left-radius: 4px; }
 .msg-me .msg-body { background: var(--bubble-me); color: var(--bubble-me-text); border-bottom-right-radius: 4px; }
 
+/* ---------- grouped consecutive messages (#16) ---------- */
+/* A run of same-author messages within a short window (GROUP_WINDOW_MS in
+   main.js) collapses the repeated header: the avatar is kept in the layout
+   (visibility, not display — the left gutter stays aligned so the text keeps
+   its flush edge) but not painted, the sender name drops out of the meta
+   line, and the reduced top margin packs the run tighter. The small
+   timestamp stays: one quiet clock per bubble instead of a full header. */
+.msg-row.grouped { margin-top: -6px; } /* comfortable: 8px list gap → 2px */
+.msg-row.grouped .msg-avatar { visibility: hidden; }
+.msg-row.grouped .msg-sender { display: none; }
+
+/* ---------- "New messages" unread divider (#11) ---------- */
+/* WhatsApp-style: a full-width hairline with a centered pill, inserted by
+   renderMessages above the first unread post so it's obvious where the unread
+   part starts. Uses the same --unread accent as the sidebar badge. */
+.unread-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+}
+.unread-divider::before,
+.unread-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--unread);
+  opacity: 0.5;
+}
+.unread-pill {
+  flex: 0 0 auto;
+  background: var(--unread);
+  color: #fff;
+  font-size: 0.79rem;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+
 /* ---------- composer ---------- */
 .composer {
   display: flex;
@@ -424,6 +483,7 @@ button {
 :root[data-density="compact"] .messages { gap: 3px; padding: 12px 16px; }
 :root[data-density="compact"] .msg-body { padding: 5px 10px; }
 :root[data-density="compact"] .msg-avatar { width: 24px; height: 24px; }
+:root[data-density="compact"] .msg-row.grouped { margin-top: -2px; } /* 3px list gap → 1px */
 :root[data-density="compact"] .channel-item { padding: 5px 12px; }
 :root[data-density="compact"] .item-avatar { width: 28px; height: 28px; }
 :root[data-density="compact"] .sidebar-header { padding: 10px 14px; }
@@ -602,6 +662,30 @@ select.modal-input { appearance: none; cursor: pointer; }
   color: var(--text-dim);
 }
 .msg-body ul, .msg-body ol { margin: 4px 0; padding-left: 20px; }
+/* GFM pipe tables (#13): the wrapper carries the outer frame and scrolls
+   horizontally, so a wide table never breaks the bubble; its overflow clips
+   the table to the rounded corners. Inner grid lines come from the cells —
+   the last column/row drop theirs so nothing doubles up against the frame. */
+.msg-body .table-wrap {
+  overflow-x: auto;
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.msg-body .md-table { border-collapse: collapse; }
+.msg-body .md-table th, .msg-body .md-table td {
+  padding: 4px 12px;
+  text-align: left;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.msg-body .md-table tr > :last-child { border-right: 0; }
+.msg-body .md-table tbody tr:last-child > * { border-bottom: 0; }
+/* The header tint reuses --code-bg: a translucent wash that stays readable on
+   both bubble colors and in both themes. */
+.msg-body .md-table th { background: var(--code-bg); font-weight: 600; }
+.msg-body .md-table .align-center { text-align: center; }
+.msg-body .md-table .align-right { text-align: right; }
 
 /* ---------- outgoing attachments ---------- */
 .attach-btn {
@@ -703,7 +787,7 @@ img.emoji {
   display: inline-block;
 }
 .composer { position: relative; }
-.emoji-popup {
+.emoji-popup, .mention-popup {
   position: absolute;
   bottom: 100%;
   left: 88px;
@@ -716,7 +800,7 @@ img.emoji {
   overflow: hidden;
   z-index: 50;
 }
-.emoji-row {
+.emoji-row, .mention-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -774,9 +858,11 @@ img.emoji {
   font-size: 0.93rem;
 }
 
-.emoji-row:hover { background: var(--bg-3); }
-.emoji-row.sel { background: var(--accent-dim); }
+.emoji-row:hover, .mention-row:hover { background: var(--bg-3); }
+.emoji-row.sel, .mention-row.sel { background: var(--accent-dim); }
 .emoji-row .glyph { width: 1.6em; text-align: center; font-size: 1.14rem; line-height: 1; }
+.mention-row .un { font-weight: 600; }
+.mention-row .rn { color: var(--text-faint); }
 
 /* ---------- reactions ---------- */
 .reactions {
@@ -786,6 +872,7 @@ img.emoji {
   margin-top: 6px;
 }
 .reaction-pill {
+  position: relative; /* anchor for the .reaction-tip hovercard */
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -804,6 +891,27 @@ img.emoji {
 }
 .reaction-pill .count { font-size: 0.79rem; color: var(--text-dim); }
 .reaction-pill.mine .count { color: var(--text); }
+/* who-reacted hovercard, floating above its chip */
+.reaction-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 240px;
+  padding: 5px 9px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  text-align: center;
+  white-space: normal;
+  pointer-events: none; /* purely informational — never steals the hover */
+  z-index: 70;
+}
 .reaction-add {
   background: transparent;
   border: 1px dashed var(--border);

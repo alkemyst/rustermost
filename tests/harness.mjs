@@ -15,7 +15,8 @@
 // tag.cls, [attr="v"], [data-x="v"], :not(.cls), :checked, one-level
 // descendant), inputs' value/selection*/setSelectionRange, focus() tracking
 // document.activeElement, getBoundingClientRect() zeros, scrollTop/
-// scrollHeight numbers. Adapt the harness when the app changes, never the
+// scrollHeight numbers, and a no-op scrollIntoView that records the call.
+// Adapt the harness when the app changes, never the
 // other way around.
 
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -251,6 +252,9 @@ class FakeElement extends FakeNode {
   getAttribute(name) { return hasOwn(this.attrs, name) ? this.attrs[name] : null; }
   setSelectionRange(s, e) { this.selectionStart = s; this.selectionEnd = e; }
   getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
+  // Zero-size boxes can't really scroll; record the call so tests can assert
+  // the intent (like focus() parking document.activeElement).
+  scrollIntoView() { this.scrolledIntoView = true; }
   focus() { if (currentDoc) currentDoc.activeElement = this; this.focused = true; }
   blur() { this.focused = false; }
   click() { dispatch(this, "click"); }
@@ -315,7 +319,10 @@ function buildSkeleton(doc) {
   const app = h("div", { id: "app-view", class: "app-view hidden" },
     h("div", { id: "me-avatar" }), h("div", { id: "me-name" }),
     h("button", { id: "settings-btn" }), h("button", { id: "new-btn" }),
-    h("input", { id: "search-input" }), h("div", { id: "channel-list" }), h("div", { id: "empty-state" }),
+    h("input", { id: "search-input" }),
+    h("button", { id: "search-clear-btn", type: "button", class: "search-clear hidden", "aria-label": "Clear search" },
+      doc.createTextNode("✕")),
+    h("div", { id: "channel-list" }), h("div", { id: "empty-state" }),
     h("div", { id: "chat-panel", class: "chat-panel hidden" },
       h("div", { id: "chat-title" }), h("div", { id: "chat-sub" }), h("button", { id: "mute-btn", type: "button" }),
       h("div", { id: "messages" }), h("div", { id: "pending-files", class: "pending-files hidden" }),

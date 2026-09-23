@@ -112,6 +112,11 @@ const state = {
   // Unread conversation that was just opened: stays listed under Unread until
   // another conversation is opened, so it doesn't vanish from under the click.
   keptUnreadId: null,
+  // Unread count captured when a channel is opened, BEFORE markViewed zeroes
+  // the badge — anchors the "New messages" divider (#11) for as long as the
+  // channel stays open (repaints re-derive the divider from it). Replaced on
+  // every openChannel, so switching channels clears it.
+  unreadAtOpen: null, // { channelId, count } | null
   unread: {}, // channelId -> count
   dmNames: {}, // channelId -> name learned from a live sender (fallback)
   users: {}, // user_id -> user object { id, username, first_name, last_name, nickname }
@@ -141,6 +146,13 @@ const state = {
 
 const PAGE_SIZE = 30; // matches the backend's per_page
 
+// Issue #16: consecutive messages from the same author within a short window
+// collapse into a group — follow-up bubbles hide the repeated avatar (the
+// gutter stays, so the text keeps its alignment) and sender name, and pack
+// tighter (see .grouped in styles.css). 5 minutes mirrors the batching feel
+// of the native client and WhatsApp.
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
 // ---------- element refs ----------
 const $ = (id) => document.getElementById(id);
 // Own-property lookup that ignores Object.prototype — for tables indexed by
@@ -154,6 +166,7 @@ const loginStatus = $("login-status");
 const meAvatar = $("me-avatar");
 const meName = $("me-name");
 const searchInput = $("search-input");
+const searchClearBtn = $("search-clear-btn");
 const channelList = $("channel-list");
 const emptyState = $("empty-state");
 const chatPanel = $("chat-panel");
@@ -365,6 +378,8 @@ async function init() {
     renderSidebar();
     // Try to name the 1:1 DM partners (no-op until get_users_by_ids exists).
     resolveUsers(collectDmPartnerIds()).then(() => renderSidebar());
+    // Fire-and-forget: warm the DM disk snapshots in the background (#9).
+    prefetchDmCaches();
   } catch (e) {
     console.error("fetch_all_channels failed", e);
     channelList.innerHTML = '<div class="list-empty">Failed to load channels.</div>';
@@ -429,6 +444,80 @@ function renderMe() {
   decorateAvatar(meAvatar, state.me?.id, name);
 }
 
+// ================= DM POST-CACHE PREFETCH =================
+// Issue #9: openChannel paints instantly from the on-disk snapshot, but that
+// snapshot only exists for channels whose posts were fetched once before (the
+// Rust side rewrites it as a side effect of get_posts) — first-time-opened
+// DMs still showed "Loading messages…". So once the channel list is in, warm
+// the snapshot for the most relevant conversations in the background: a
+// fire-and-forget get_posts here is all it takes — no backend change, and no
+// repaint, sidebar re-render or notification either (the result is discarded,
+// the disk write happens server-side in the backend session).
+//
+// Gentle by design:
+//  - isDM covers 1:1 (D) and group (G) chats alike — both are the person
+//    conversations a user clicks expecting them to be instant, and the cap
+//    below keeps "G too" cheap. Named channels stay discoverable-on-demand.
+//  - PREFETCH_LIMIT is a hard cap on requests per launch: an account with
+//    hundreds of DMs warms only the 10 most-recently-active (activityOf, the
+//    sidebar's own ordering) — the ones actually likely to be clicked.
+//  - PREFETCH_CONCURRENCY workers at a time — a slow drip, never a burst.
+//  - Errors are swallowed: offline at boot must stay invisible.
+//
+// Re-run safe: an id is queued at most once per session (prefetchEnqueued),
+// and anything already opened/warmed is skipped at pop time — so a future
+// channel-list refresh can re-call prefetchDmCaches to warm brand-new
+// conversations without duplicating work for the rest.
+const PREFETCH_LIMIT = 10;
+const PREFETCH_CONCURRENCY = 2;
+const prefetchEnqueued = new Set(); // ids queued for warming this session
+const postFetches = new Map(); // channelId -> in-flight plain get_posts promise
+const postsWarmed = new Set(); // ids with a successful fetch this session (snapshot exists)
+
+// One in-flight plain get_posts per channel, shared between openChannel and
+// the background prefetch: whoever asks second joins the same promise instead
+// of duplicating the request. Success marks the channel warmed (the snapshot
+// write has happened on the Rust side), so the prefetch can skip it later;
+// failures leave postsWarmed untouched, so a later attempt retries normally.
+function fetchPostsOnce(channelId) {
+  let p = postFetches.get(channelId);
+  if (!p) {
+    p = invoke("get_posts", { channelId })
+      .then((posts) => { postsWarmed.add(channelId); return posts; })
+      .finally(() => postFetches.delete(channelId));
+    postFetches.set(channelId, p);
+  }
+  return p;
+}
+
+async function prefetchDmCaches() {
+  const pool = state.channels
+    .filter((ch) => isDM(ch) && !prefetchEnqueued.has(ch.id))
+    .sort((a, b) => activityOf(b) - activityOf(a))
+    .slice(0, PREFETCH_LIMIT)
+    .map((ch) => ch.id);
+  for (const id of pool) prefetchEnqueued.add(id);
+
+  // Shared cursor; each worker takes the next id until the pool is drained.
+  let next = 0;
+  const worker = async () => {
+    while (next < pool.length) {
+      const id = pool[next++];
+      // The user got here first: opening this channel already fetched (or is
+      // fetching) it, which wrote the same snapshot — never duplicate that.
+      if (postsWarmed.has(id) || postFetches.has(id)) continue;
+      try {
+        await fetchPostsOnce(id);
+      } catch (_) {
+        /* warming is invisible: offline or a server hiccup stays silent */
+      }
+    }
+  };
+  const workers = [];
+  for (let i = 0; i < Math.min(PREFETCH_CONCURRENCY, pool.length); i++) workers.push(worker());
+  await Promise.all(workers);
+}
+
 // ================= USER RESOLUTION =================
 // For a 1:1 DM, Mattermost sets channel.name = "<userIdA>__<userIdB>".
 // The partner is the id that isn't mine.
@@ -483,6 +572,14 @@ async function resolveUsers(ids) {
 
 // ================= SIDEBAR =================
 searchInput.addEventListener("input", renderSidebar);
+
+// Round ✕ overlaid on the field's right edge: clears the text, re-runs the
+// exact same filter path as typing, and hands focus back to the input.
+searchClearBtn.addEventListener("click", () => {
+  searchInput.value = "";
+  renderSidebar();
+  searchInput.focus();
+});
 
 function displayName(ch) {
   if (ch.display_name && ch.display_name.trim()) return ch.display_name;
@@ -542,6 +639,11 @@ function activityOf(ch) {
 
 function renderSidebar() {
   const q = (searchInput.value || "").toLowerCase();
+  // The ✕ is shown exactly when there is text to clear. Syncing here —
+  // instead of only in the input/click listeners — means every render path
+  // (typing, the button itself, live-event refreshes, any future code that
+  // sets searchInput.value) keeps the icon in agreement with the field.
+  searchClearBtn.classList.toggle("hidden", !q);
   const match = (ch) => searchText(ch).includes(q);
 
   // Silenced conversations never reach the pinned Unread section — that is
@@ -760,7 +862,12 @@ function renderMuteBtn() {
 async function openChannel(id) {
   closeMsgMenu();
   cancelEdit(); // an edit never survives a channel switch
+  histReset(); // nor does composer undo history — it belongs to the conversation (#18)
   state.activeId = id;
+  // #11: pin down where the unread part starts, before markViewed below wipes
+  // the count — renderMessages drops the "New messages" divider that many
+  // posts up from the bottom.
+  state.unreadAtOpen = (state.unread[id] || 0) > 0 ? { channelId: id, count: state.unread[id] } : null;
   if (id !== state.keptUnreadId) state.keptUnreadId = (state.unread[id] || 0) > 0 ? id : null;
   markViewed(id); // clears the badge locally, reports the read to the server
   renderSidebar();
@@ -771,7 +878,10 @@ async function openChannel(id) {
   chatTitle.textContent = displayName(ch);
   chatSub.textContent = subLabel(ch);
   renderMuteBtn();
-  composerInput.focus(); // ready to type right after picking a conversation
+  // Opening a conversation hands focus straight to the composer (#17): search →
+  // click → type, with no extra click into the textbox. Done right away — the
+  // async loads below never touch focus, so nothing steals it back.
+  composerInput.focus();
   messagesEl.innerHTML = '<div class="loading">Loading messages…</div>';
 
   // reset paging for the newly opened conversation
@@ -801,7 +911,9 @@ async function openChannel(id) {
   }
 
   try {
-    const posts = await invoke("get_posts", { channelId: id });
+    // fetchPostsOnce joins an in-flight background warm (or a rapid
+    // double-open) for this channel instead of firing a duplicate request.
+    const posts = await fetchPostsOnce(id);
     if (state.activeId !== id) return; // user switched away while loading
     freshPainted = true;
     renderMessages(posts);
@@ -847,14 +959,30 @@ async function loadOlder() {
     if (state.activeId !== channelId) return;
 
     const prevH = messagesEl.scrollHeight;
+    const prevFirstRow = messagesEl.querySelector(".msg-row"); // boundary partner below
     const frag = document.createDocumentFragment();
+    let prevRow = null; // the page's top bubble has nothing above it yet
     for (const p of older) {
       const mine = state.me && p.user_id === state.me.id;
       const sender = mine ? null : realName(state.users[p.user_id]);
-      frag.appendChild(bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0 }));
+      const grouped = shouldGroupWith(prevRow, p.user_id, p.create_at);
+      prevRow = bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0, grouped });
+      frag.appendChild(prevRow);
     }
     messagesEl.insertBefore(frag, messagesEl.firstChild);
     messagesEl.scrollTop += messagesEl.scrollHeight - prevH; // keep the view steady
+
+    // Boundary pairing (#16): the previously-first bubble may now be the
+    // continuation of the prepended page's last post — regroup it. The
+    // adjacency check keeps any separator sitting between the pages (the #11
+    // unread divider, loading placeholders …) from being treated as a
+    // grouping partner.
+    if (prevFirstRow && prevFirstRow.previousElementSibling === prevRow) {
+      prevFirstRow.classList.toggle(
+        "grouped",
+        shouldGroupWith(prevRow, prevFirstRow.dataset.author, Number(prevFirstRow.dataset.ts))
+      );
+    }
 
     state.pageOldest = older[0].id;
     state.pageMore = older.length >= PAGE_SIZE;
@@ -876,14 +1004,74 @@ function renderMessages(posts) {
     messagesEl.appendChild(e);
     return;
   }
-  for (const p of posts) {
+  // Issue #11: the "New messages" divider goes before the first unread post.
+  // The count was captured at openChannel time (state.unreadAtOpen) and
+  // survives every repaint while the channel stays open, even though
+  // markViewed has zeroed the badge since. Anchored at the bottom end — the
+  // last `count` posts are the unread ones — so loadOlder prepends above
+  // never shift it; more unread than loaded posts → it sits on top (the pages
+  // in between were fetched but the boundary still marks "from here down").
+  const uo = state.unreadAtOpen;
+  const dividerAt =
+    uo && uo.channelId === state.activeId && uo.count > 0
+      ? Math.max(0, posts.length - uo.count)
+      : -1;
+  let prevRow = null; // grouping is pairwise: row N compares with row N−1
+  let divider = null; // the #11 unread divider, when one is inserted
+  posts.forEach((p, i) => {
+    if (i === dividerAt) {
+      divider = unreadDividerEl();
+      messagesEl.appendChild(divider);
+      prevRow = null; // the divider visually breaks a same-author run
+    }
     const mine = state.me && p.user_id === state.me.id;
     const sender = mine ? null : realName(state.users[p.user_id]); // named once resolvable
-    messagesEl.appendChild(
-      bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0 })
-    );
+    const grouped = shouldGroupWith(prevRow, p.user_id, p.create_at);
+    prevRow = bubbleEl({ mine, uid: p.user_id, sender, text: p.message, ts: p.create_at, files: p.file_ids, postId: p.id, reactions: p.metadata && p.metadata.reactions, edited: p.edit_at > 0, grouped });
+    messagesEl.appendChild(prevRow);
+  });
+  // Land on the unread boundary — that's what the user came to read — and
+  // only fall to the latest when there is nothing unread.
+  if (divider) divider.scrollIntoView({ block: "start" });
+  else scrollToBottom();
+}
+
+// WhatsApp-style "New messages" divider: a full-width hairline with a
+// centered pill (see styles.css). DOM nodes only, like everything else here.
+function unreadDividerEl() {
+  const el = document.createElement("div");
+  el.className = "unread-divider";
+  const pill = document.createElement("span");
+  pill.className = "unread-pill";
+  pill.textContent = "New messages";
+  el.appendChild(pill);
+  return el;
+}
+
+// ---------- message grouping (#16) ----------
+// Is a new bubble a direct continuation of `prevRow` (the bubble rendered
+// right before it)? bubbleEl stamps every row with data-author / data-ts, so
+// the same helper serves the full repaint, live appends and the loadOlder
+// boundary fix-up. An unknown author (live event for a user we haven't
+// resolved yet) never groups — showing one header too many beats hiding one.
+function shouldGroupWith(prevRow, uid, ts) {
+  if (!prevRow || !uid || !ts) return false;
+  const prevTs = Number(prevRow.dataset.ts);
+  return prevRow.dataset.author === uid
+    && Number.isFinite(prevTs)
+    && ts - prevTs >= 0
+    && ts - prevTs < GROUP_WINDOW_MS;
+}
+
+// The last rendered message bubble, skipping any non-message trailing nodes
+// (ephemeral slash-command replies, the loadOlder spinner sit in the same
+// list but are never a grouping partner).
+function lastMsgRow() {
+  const kids = messagesEl.children;
+  for (let i = kids.length - 1; i >= 0; i--) {
+    if (kids[i].classList.contains("msg-row")) return kids[i];
   }
-  scrollToBottom();
+  return null;
 }
 
 // A round avatar for a user. Starts as a colored initial, then swaps to the
@@ -1005,8 +1193,8 @@ function emojiNode(name) {
 // Minimal chat-flavored markdown, rendered by BUILDING DOM NODES — message
 // content never goes through innerHTML, so it can't inject markup. Supported:
 // [label](url), bare http(s) URLs, **bold**, *italic*/_italic_, ~~strike~~,
-// `code`, ``` fenced blocks ```, > quotes, -/*/1. lists. Everything else is
-// plain text.
+// `code`, ``` fenced blocks ```, > quotes, -/*/1. lists, GFM pipe tables.
+// Everything else is plain text.
 
 // Open in the system browser via the opener plugin; never navigate the webview.
 // Only http(s) may leave the app — the markdown regexes already guarantee that
@@ -1093,7 +1281,41 @@ const FENCE_RE = /^\s*```/;
 const QUOTE_RE = /^>\s?/;
 const UL_RE = /^\s*[-*]\s+/;
 const OL_RE = /^\s*\d+\.\s+/;
-const startsBlock = (line) => FENCE_RE.test(line) || QUOTE_RE.test(line) || UL_RE.test(line) || OL_RE.test(line);
+// One cell of a GFM table delimiter row: ≥3 dashes, optional alignment colons.
+const TABLE_DELIM_CELL_RE = /^:?-{3,}:?$/;
+
+// A table row's cells, trimmed; surrounding pipes are optional (| a | b | and
+// a | b both split to ["a", "b"]). Escaped pipes are out of scope on purpose.
+function splitTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+// If lines[i] opens a GFM pipe table — a pipe line sitting directly above a
+// |---|---| delimiter row — return { headers, aligns }, else null. Like
+// commonmark/GFM the delimiter must have exactly the header's cell count:
+// a mismatch (e.g. a "---" hr under a pipe-y line) stays plain text instead
+// of morphing into a mangled table.
+function tableStartAt(lines, i) {
+  if (i + 1 >= lines.length || !lines[i].includes("|")) return null;
+  const headers = splitTableRow(lines[i]);
+  const delims = splitTableRow(lines[i + 1]);
+  if (delims.length !== headers.length) return null;
+  if (!delims.every((c) => TABLE_DELIM_CELL_RE.test(c))) return null;
+  // :--- left, ---: right, :---: center, bare --- default (null → no class).
+  const aligns = delims.map((c) =>
+    c.startsWith(":") ? (c.endsWith(":") ? "center" : "left") : c.endsWith(":") ? "right" : null
+  );
+  return { headers, aligns };
+}
+
+// Detects block starts at lines[i]; tables need the lookahead (a header row
+// alone is just text — the delimiter line below is what makes it a table).
+const startsBlock = (lines, i) =>
+  FENCE_RE.test(lines[i]) || QUOTE_RE.test(lines[i]) || UL_RE.test(lines[i]) ||
+  OL_RE.test(lines[i]) || !!tableStartAt(lines, i);
 
 function renderMarkdown(text) {
   const frag = document.createDocumentFragment();
@@ -1141,9 +1363,53 @@ function renderMarkdown(text) {
       continue;
     }
 
+    const tbl = tableStartAt(lines, i);
+    if (tbl) {
+      // Semantic table in a scroller: wide tables scroll sideways instead of
+      // breaking the bubble. Cells run through inlineMd, so **x**, `y`, links
+      // and :emoji: keep working inside them.
+      const wrap = document.createElement("div");
+      wrap.className = "table-wrap";
+      const table = document.createElement("table");
+      table.className = "md-table";
+      const thead = document.createElement("thead");
+      const htr = document.createElement("tr");
+      tbl.headers.forEach((h, c) => {
+        const th = document.createElement("th");
+        if (tbl.aligns[c]) th.className = `align-${tbl.aligns[c]}`;
+        inlineMd(th, h);
+        htr.appendChild(th);
+      });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+      const tbody = document.createElement("tbody");
+      i += 2; // header + delimiter
+      // Body: consecutive pipe-lines. A line that starts another block (or a
+      // fresh table header — chat users stack tables without blank lines)
+      // ends it. Ragged rows are fine: short rows pad with empty cells,
+      // extra cells just append (commonmark-table leniency — don't crash).
+      while (i < lines.length && lines[i].includes("|") && !startsBlock(lines, i)) {
+        const cells = splitTableRow(lines[i]);
+        while (cells.length < tbl.headers.length) cells.push("");
+        const tr = document.createElement("tr");
+        cells.forEach((cell, c) => {
+          const td = document.createElement("td");
+          if (tbl.aligns[c]) td.className = `align-${tbl.aligns[c]}`;
+          inlineMd(td, cell);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+        i++;
+      }
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      frag.appendChild(wrap);
+      continue;
+    }
+
     inlineMd(frag, line);
     i++;
-    if (i < lines.length && !startsBlock(lines[i])) frag.appendChild(document.createElement("br"));
+    if (i < lines.length && !startsBlock(lines, i)) frag.appendChild(document.createElement("br"));
   }
   return frag;
 }
@@ -1270,6 +1536,58 @@ async function toggleReaction(postId, name) {
   }
 }
 
+// Names listed in a reaction hovercard before the rest collapses into
+// "and N more".
+const REACTION_TIP_MAX = 10;
+
+// GitHub-style hovercard text for a reaction chip: who reacted, "You" first
+// (WhatsApp-style), everyone else in reaction order. Users we haven't
+// resolved yet degrade to "someone" (never a raw id, never "undefined") and
+// the text updates once resolveUsers brings their names in.
+function reactionTipText(postId, name) {
+  const set = state.reactions[postId] && state.reactions[postId][name];
+  if (!set || !set.size) return `:${name}:`;
+  const my = state.me?.id;
+  const ids = [...set];
+  if (my && set.has(my)) {
+    ids.splice(ids.indexOf(my), 1);
+    ids.unshift(my);
+  }
+  const shown = ids.slice(0, REACTION_TIP_MAX).map((id) =>
+    id === my ? "You" : realName(state.users[id]) || "someone"
+  );
+  const extra = ids.length - shown.length;
+  let names = shown.join(", ");
+  if (extra > 0) names += ` and ${extra} more`;
+  else if (shown.length > 1) names = shown.slice(0, -1).join(", ") + " and " + shown[shown.length - 1];
+  return `${names} reacted with :${name}:`;
+}
+
+// Hovercard for a reaction chip: a plain child div of the pill, so it dies
+// with the pill on every renderReactionsInto rebuild — nothing can leak
+// across re-renders. Resolution of unknown reactor names refreshes it in
+// place, but only while this exact hover is still alive.
+function showReactionTip(pill, postId, name) {
+  let tip = pill.querySelector(".reaction-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.className = "reaction-tip";
+    pill.appendChild(tip);
+  }
+  tip.textContent = reactionTipText(postId, name);
+  const unknown = [...(state.reactions[postId]?.[name] || [])].filter((id) => !state.users[id]);
+  if (unknown.length) {
+    resolveUsers(unknown).then(() => {
+      if (tip.parentNode === pill) tip.textContent = reactionTipText(postId, name);
+    });
+  }
+}
+
+function hideReactionTip(pill) {
+  const tip = pill.querySelector(".reaction-tip");
+  if (tip) tip.remove();
+}
+
 function renderReactionsInto(container, postId) {
   container.innerHTML = "";
   const map = state.reactions[postId] || {};
@@ -1279,13 +1597,14 @@ function renderReactionsInto(container, postId) {
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = "reaction-pill" + (my && users.has(my) ? " mine" : "");
-    pill.title = `:${name}:`;
     pill.appendChild(emojiNode(name) || document.createTextNode(`:${name}:`));
     const cnt = document.createElement("span");
     cnt.className = "count";
     cnt.textContent = users.size;
     pill.appendChild(cnt);
     pill.addEventListener("click", () => toggleReaction(postId, name));
+    pill.addEventListener("mouseenter", () => showReactionTip(pill, postId, name));
+    pill.addEventListener("mouseleave", () => hideReactionTip(pill));
     container.appendChild(pill);
   }
   const add = document.createElement("button");
@@ -1381,10 +1700,16 @@ window.addEventListener("blur", closeChannelMenu);
 messagesEl.addEventListener("scroll", closeMsgMenu);
 window.addEventListener("blur", closeMsgMenu);
 
-function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edited }) {
+function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edited, grouped }) {
   const row = document.createElement("div");
-  row.className = "msg-row" + (mine ? " mine" : "");
+  row.className = "msg-row" + (mine ? " mine" : "") + (grouped ? " grouped" : "");
   if (postId) row.dataset.postId = postId; // how edits/locators find this bubble
+  // Grouping glue (#16): who sent this bubble and when. NB: deliberately NOT
+  // data-uid — that attribute signals "paint the avatar into this element"
+  // (see ensureAvatar), which a row must never be subject to.
+  if (uid) row.dataset.author = uid;
+  if (ts) row.dataset.ts = String(ts); // … and when
+
   row.appendChild(avatarEl(uid, mine ? state.me?.username : sender));
 
   const el = document.createElement("div");
@@ -1393,7 +1718,17 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edite
   if (sender || ts) {
     const meta = document.createElement("div");
     meta.className = "msg-meta";
-    meta.textContent = (sender ? sender + " · " : "") + formatTime(ts);
+    // The sender gets its own span so a grouped row can hide just it via CSS
+    // (.msg-row.grouped .msg-sender) while keeping the small timestamp —
+    // that way a bubble can flip in and out of a group (loadOlder boundary
+    // fix-up) without rebuilding any text.
+    if (sender) {
+      const who = document.createElement("span");
+      who.className = "msg-sender";
+      who.textContent = sender + " · ";
+      meta.appendChild(who);
+    }
+    meta.appendChild(document.createTextNode(formatTime(ts)));
     if (edited) meta.appendChild(editedMarkerEl()); // history posts carrying edit_at
     el.appendChild(meta);
   }
@@ -1522,8 +1857,11 @@ function onIncoming(event) {
     if (placeholder) placeholder.remove();
     // live events carry the username but not the user_id — resolve it if we can
     const uid = mine ? state.me?.id : state.usersByName[senderClean]?.id;
+    // A live bubble from the same author as the last one on screen joins its
+    // group (#16); a different author (or an unresolved sender) restarts it.
+    const grouped = shouldGroupWith(lastMsgRow(), uid, Date.now());
     messagesEl.appendChild(
-      bubbleEl({ mine, uid, sender: mine ? null : p.sender, text: p.message, ts: Date.now(), files: p.file_ids, postId: p.id })
+      bubbleEl({ mine, uid, sender: mine ? null : p.sender, text: p.message, ts: Date.now(), files: p.file_ids, postId: p.id, grouped })
     );
     scrollToBottom();
     if (document.hasFocus()) {
@@ -1546,9 +1884,18 @@ composer.addEventListener("submit", (e) => {
 });
 composerInput.addEventListener("keydown", (e) => {
   if (handleEmojiPopupKey(e)) return; // popup swallows Enter/arrows while open
+  if (handleMentionPopupKey(e)) return; // same for the @mention popup (#21)
   if (e.key === "Escape" && state.editing) {
     e.preventDefault();
     cancelEdit(); // bail out of edit mode without saving
+    return;
+  }
+  // The webview has no usable native textarea undo (#18) — our own history
+  // lives below. preventDefault unconditionally: the webview must never try
+  // its (broken) native undo behind our back.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && "zZyY".includes(e.key)) {
+    e.preventDefault();
+    if (e.shiftKey || e.key === "y" || e.key === "Y") histRedo(); else histUndo();
     return;
   }
   if (e.key === "Enter" && !e.shiftKey) {
@@ -1558,7 +1905,106 @@ composerInput.addEventListener("keydown", (e) => {
 });
 composerInput.addEventListener("input", autoResize);
 composerInput.addEventListener("input", updateEmojiPopup);
-composerInput.addEventListener("blur", () => setTimeout(hideEmojiPopup, 150)); // let clicks land first
+composerInput.addEventListener("input", updateMentionPopup);
+composerInput.addEventListener("input", histInput);
+composerInput.addEventListener("blur", () => setTimeout(() => { hideEmojiPopup(); hideMentionPopup(); }, 150)); // let clicks land first
+
+// ---------- undo / redo (#18) ----------
+// WebKitGTK (and WKWebView/WebView2) give a textarea no usable native undo —
+// paste → Ctrl+Z did nothing. So the composer keeps its own bounded history of
+// {value, selectionStart, selectionEnd} snapshots.
+//
+// Step grouping: a run of same-kind inputs (typing, deleting) merges into ONE
+// step; a kind switch or a >HISTORY_IDLE_MS pause breaks it. Paste / drop /
+// cut are ALWAYS atomic — one Ctrl+Z removes exactly the paste, never more.
+// Rewrites the app performs itself (emoji insert, …) use the histPush() /
+// histSettle() bookends; histReset() wipes the stacks wherever the composer is
+// already reset (send, channel switch, edit arm/cancel) and re-bases onto the
+// content standing there at that moment.
+const HISTORY_MAX = 100;
+const HISTORY_IDLE_MS = 1000;
+const HISTORY_ATOMIC = new Set(["insertFromPaste", "insertFromDrop", "deleteByCut"]);
+
+const composerHistory = {
+  undo: [], // settled snapshots, oldest first — each is the state BEFORE a step
+  redo: [], // undone snapshots, newest last
+  pending: histSnap(), // state as of the last accounted change (= pre-state of the next input)
+  lastType: null, // inputType of the open burst (null = the next input breaks)
+  lastAt: 0, // when the open burst last moved
+};
+
+function histSnap() {
+  return { value: composerInput.value, s: composerInput.selectionStart, e: composerInput.selectionEnd };
+}
+
+function histPushStack(snap) {
+  composerHistory.undo.push(snap);
+  if (composerHistory.undo.length > HISTORY_MAX) composerHistory.undo.shift(); // drop the oldest
+}
+
+// input listener: decides the step boundaries around typed/pasted text.
+// NB: pending is always EAGER — snapshotted while the textarea still holds the
+// state it describes; an `input` event itself already fires post-mutation.
+function histInput(e) {
+  const h = composerHistory;
+  const now = Date.now();
+  const breaks = h.lastType === null
+    || (e.inputType && HISTORY_ATOMIC.has(e.inputType))
+    || e.inputType !== h.lastType
+    || now - h.lastAt > HISTORY_IDLE_MS;
+  if (breaks) histPushStack(h.pending);
+  h.redo.length = 0; // any new input kills the redo branch
+  h.lastType = e.inputType || null;
+  h.lastAt = now;
+  h.pending = histSnap();
+}
+
+// Bookends for rewrites the app performs itself (no input event fires there):
+// push the pre-rewrite state first, then re-base onto the rewritten content.
+function histPush() {
+  const h = composerHistory;
+  histPushStack(h.pending);
+  h.redo.length = 0;
+  h.lastType = null; // the next typed char starts a fresh step
+}
+
+function histSettle() {
+  composerHistory.pending = histSnap();
+  composerHistory.lastType = null;
+}
+
+// Forget everything (send, channel switch, edit arm/cancel): whatever is in
+// the box right now becomes the new base — no undo past this point.
+function histReset() {
+  composerHistory.undo.length = 0;
+  composerHistory.redo.length = 0;
+  composerHistory.pending = histSnap();
+  composerHistory.lastType = null;
+}
+
+function histApply(snap) {
+  composerInput.value = snap.value;
+  composerInput.setSelectionRange(snap.s, snap.e);
+  composerHistory.pending = histSnap();
+  composerHistory.lastType = null; // the next input breaks from the restored state
+  autoResize();
+  updateEmojiPopup(); // re-filter (or hide) against the restored text
+  updateMentionPopup();
+}
+
+function histUndo() {
+  const h = composerHistory;
+  if (!h.undo.length) return; // nothing to undo — already preventDefault'ed
+  h.redo.push(histSnap());
+  histApply(h.undo.pop());
+}
+
+function histRedo() {
+  const h = composerHistory;
+  if (!h.redo.length) return;
+  histPushStack(histSnap());
+  histApply(h.redo.pop());
+}
 
 // ---------- emoji autocomplete ----------
 // Typing ":na" in the composer suggests matching emoji; Enter/Tab/click inserts.
@@ -1634,10 +2080,125 @@ function applyEmoji(cand) {
   const start = before.length - m[2].length - 1; // strip ":prefix"
   // Unicode -> insert the character itself; custom -> keep the :name: code.
   const insert = cand.ch ? cand.ch + " " : `:${cand.name}: `;
+  histPush(); // one Ctrl+Z restores the typed ":prefix" (#18)
   composerInput.value = before.slice(0, start) + insert + after;
   const caret = start + insert.length;
   composerInput.setSelectionRange(caret, caret);
+  histSettle();
   hideEmojiPopup();
+  composerInput.focus();
+  autoResize();
+}
+
+// ---------- @mention autocomplete (#21) ----------
+// Mirrors the emoji autocomplete above, GitHub-style: typing "@al" lists known
+// users; ArrowUp/Down + Enter/Tab/click inserts "@username ". Candidates come
+// from state.users (filled by get_users_by_ids / search_users bookkeeping) and
+// match the prefix against the username OR first/last/nick name — insertion
+// always uses the username. The two autocompletes key on disjoint tokens
+// (":" vs "@"), so at most one popup ever has candidates.
+const MENTION_PREFIX_RE = /(^|\s)@([a-z0-9._-]{1,})$/i;
+const MENTION_MAX = 8;
+
+const mentionPopup = document.createElement("div");
+mentionPopup.className = "mention-popup hidden";
+composer.appendChild(mentionPopup);
+let mentionCands = [];
+let mentionSel = 0;
+
+function mentionCandidates(prefix) {
+  const p = prefix.toLowerCase();
+  const byUsername = [];
+  const byName = [];
+  const seen = new Set();
+  for (const u of Object.values(state.users)) {
+    if (!u || !u.username || seen.has(u.username)) continue;
+    if (state.me && u.id === state.me.id) continue; // mentioning myself is noise
+    seen.add(u.username);
+    const rec = { username: u.username, name: realName(u) };
+    if (u.username.toLowerCase().startsWith(p)) byUsername.push(rec);
+    else if (
+      (u.first_name || "").toLowerCase().startsWith(p)
+      || (u.last_name || "").toLowerCase().startsWith(p)
+      || (u.nickname || "").toLowerCase().startsWith(p)
+    ) byName.push(rec);
+  }
+  return byUsername.concat(byName).slice(0, MENTION_MAX);
+}
+
+function updateMentionPopup() {
+  const upToCaret = composerInput.value.slice(0, composerInput.selectionStart);
+  const m = upToCaret.match(MENTION_PREFIX_RE);
+  mentionCands = m ? mentionCandidates(m[2]) : [];
+  mentionSel = 0;
+  renderMentionPopup();
+}
+
+function mentionRowEl(u, selected) {
+  const row = document.createElement("div");
+  row.className = "mention-row" + (selected ? " sel" : "");
+  const un = document.createElement("span");
+  un.className = "un";
+  un.textContent = "@" + u.username;
+  row.appendChild(un);
+  if (u.name && u.name !== u.username) {
+    const rn = document.createElement("span");
+    rn.className = "rn";
+    rn.textContent = u.name;
+    row.appendChild(rn);
+  }
+  return row;
+}
+
+function renderMentionPopup() {
+  mentionPopup.innerHTML = "";
+  mentionPopup.classList.toggle("hidden", mentionCands.length === 0);
+  mentionCands.forEach((u, i) => {
+    const row = mentionRowEl(u, i === mentionSel);
+    // mousedown, not click: the composer must not lose the caret first.
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); applyMention(u); });
+    mentionPopup.appendChild(row);
+  });
+}
+
+function hideMentionPopup() {
+  mentionCands = [];
+  mentionPopup.classList.add("hidden");
+}
+
+// Returns true when the key was consumed by the popup.
+function handleMentionPopupKey(e) {
+  if (!mentionCands.length) return false;
+  if (e.key === "ArrowDown") {
+    mentionSel = (mentionSel + 1) % mentionCands.length;
+  } else if (e.key === "ArrowUp") {
+    mentionSel = (mentionSel + mentionCands.length - 1) % mentionCands.length;
+  } else if (e.key === "Enter" || e.key === "Tab") {
+    applyMention(mentionCands[mentionSel]);
+  } else if (e.key === "Escape") {
+    hideMentionPopup();
+  } else {
+    return false; // regular typing — let it through (input handler re-filters)
+  }
+  e.preventDefault();
+  renderMentionPopup();
+  return true;
+}
+
+function applyMention(u) {
+  const pos = composerInput.selectionStart;
+  const before = composerInput.value.slice(0, pos);
+  const after = composerInput.value.slice(pos);
+  const m = before.match(MENTION_PREFIX_RE);
+  if (!m) { hideMentionPopup(); return; }
+  const start = before.length - m[2].length - 1; // strip "@prefix"
+  const insert = "@" + u.username + " "; // trailing space: keep typing right away
+  histPush(); // one Ctrl+Z restores the typed "@prefix" (#18)
+  composerInput.value = before.slice(0, start) + insert + after;
+  const caret = start + insert.length;
+  composerInput.setSelectionRange(caret, caret);
+  histSettle();
+  hideMentionPopup();
   composerInput.focus();
   autoResize();
 }
@@ -1720,9 +2281,11 @@ function insertEmoji(c) {
   const pos = composerInput.selectionStart ?? composerInput.value.length;
   const before = composerInput.value.slice(0, pos);
   const after = composerInput.value.slice(pos);
+  histPush(); // picker inserts participate in composer undo (#18), one step each
   composerInput.value = before + insert + after;
   const caret = pos + insert.length;
   composerInput.setSelectionRange(caret, caret);
+  histSettle();
   autoResize();
   // Focus stays in the picker so several emoji can be picked in a row; Escape
   // or a click outside hands it back to the composer.
@@ -2058,6 +2621,14 @@ function readFileB64(file) {
   });
 }
 
+// After a send triggered by clicking ➤, the button keeps the focus — hand it
+// back to the composer so the next message can be typed right away (#17).
+// Only then: an Enter-send never left the textarea, and if the user meanwhile
+// clicked into another control (e.g. search) we must not yank focus back.
+function refocusComposer() {
+  if (document.activeElement === sendBtn) composerInput.focus();
+}
+
 async function sendCurrent() {
   // Edit mode (right-click one of my bubbles → "✏️ Edit message") reroutes the
   // composer: Enter now saves the edit instead of posting a new message.
@@ -2086,6 +2657,7 @@ async function sendCurrent() {
       }
     } finally {
       sendBtn.disabled = false;
+      refocusComposer();
     }
     return;
   }
@@ -2096,6 +2668,7 @@ async function sendCurrent() {
   const channelId = state.activeId;
   composerInput.value = "";
   autoResize();
+  histReset(); // a sent draft must never come back through undo (#18)
   sendBtn.disabled = true;
   try {
     // Slash command: "/away", "/shrug lol", … → execute, don't post as text.
@@ -2131,9 +2704,11 @@ async function sendCurrent() {
     // put the text back and keep the files so nothing is lost
     composerInput.value = text;
     autoResize();
+    histReset(); // the rescued draft is the fresh base — no undo into the void
     renderPendingFiles("Sending failed: " + e);
   } finally {
     sendBtn.disabled = false;
+    refocusComposer();
   }
 }
 
@@ -2230,6 +2805,7 @@ function startEdit({ postId, original }) {
   autoResize();
   composerInput.focus();
   composerInput.setSelectionRange(original.length, original.length);
+  histReset(); // the edit draft is a fresh base — undo stays inside it (#18)
   sendBtn.textContent = "✔";
   sendBtn.title = "Save edit";
 }
@@ -2242,6 +2818,7 @@ function cancelEdit() {
   editBarError.classList.add("hidden");
   composerInput.value = "";
   autoResize();
+  histReset(); // leave no undo trail from the edit into the next draft
   sendBtn.textContent = "➤";
   sendBtn.title = "Send";
 }
