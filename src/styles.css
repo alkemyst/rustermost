@@ -333,7 +333,7 @@ button {
    center it in the leftover space */
 .top-loading { margin: 0 auto 6px; }
 
-.msg-row { display: flex; align-items: flex-end; gap: 8px; max-width: 80%; }
+.msg-row { display: flex; align-items: flex-start; gap: 8px; max-width: 80%; }
 .msg-row:not(.mine) { align-self: flex-start; }
 .msg-row.mine { align-self: flex-end; flex-direction: row-reverse; }
 
@@ -347,11 +347,17 @@ button {
   display: flex; align-items: center; justify-content: center;
   font-size: 0.86rem; font-weight: 700; color: white;
   text-transform: uppercase;
-  margin-bottom: 2px;
+  /* #16: skip past the meta line above the bubble so the avatar's top edge
+     meets the BALLOON's top edge. Deterministic at every font-size setting
+     because the meta line has an explicit unitless line-height (scales with
+     0.79rem) and a fixed 3px bottom margin. Every rendered row has a meta
+     line (bubbleEl always passes ts), so this offset always matches;
+     .grouped drops it back to 0. */
+  margin-top: calc(0.79rem * 1.3 + 3px);
 }
-.msg { min-width: 0; display: flex; flex-direction: column; }
+.msg { min-width: 0; display: flex; flex-direction: column; position: relative; }
 .msg-me { align-items: flex-end; }
-.msg-meta { font-size: 0.79rem; color: var(--text-faint); margin: 0 4px 3px; }
+.msg-meta { font-size: 0.79rem; line-height: 1.3; color: var(--text-faint); margin: 0 4px 3px; }
 .msg-body {
   padding: 9px 13px;
   border-radius: 14px;
@@ -367,12 +373,45 @@ button {
 /* A run of same-author messages within a short window (GROUP_WINDOW_MS in
    main.js) collapses the repeated header: the avatar is kept in the layout
    (visibility, not display — the left gutter stays aligned so the text keeps
-   its flush edge) but not painted, the sender name drops out of the meta
-   line, and the reduced top margin packs the run tighter. The small
-   timestamp stays: one quiet clock per bubble instead of a full header. */
+   its flush edge) but not painted, and the whole meta line dies. The quiet
+   clock survives as a WhatsApp-style corner stamp pinned onto the bubble's
+   trailing bottom corner (mirrored on my messages), so balloons in a run sit
+   ~2px apart instead of a full header-line apart. Everything keys off the
+   .grouped class alone: the stamp node is rendered into every bubble and the
+   loadOlder boundary fix-up only flips the class — no DOM rebuild. */
 .msg-row.grouped { margin-top: -6px; } /* comfortable: 8px list gap → 2px */
-.msg-row.grouped .msg-avatar { visibility: hidden; }
-.msg-row.grouped .msg-sender { display: none; }
+.msg-row.grouped .msg-avatar { visibility: hidden; margin-top: 0; } /* row top IS the balloon top now */
+.msg-row.grouped .msg-meta { display: none; }
+
+/* The stamp docks inside the bubble's trailing padding zone; the grouped
+   body reserves that zone (~stamp width + its corner offset) so message text
+   never runs under the clock. rem, so it scales with the font-size setting. */
+.msg-stamp {
+  display: none;
+  font-size: 0.79rem;
+  line-height: 1;
+  color: var(--text-faint);
+  white-space: nowrap;
+  user-select: none;
+}
+.msg-row.grouped .msg-stamp { display: block; position: absolute; bottom: 3px; right: 8px; }
+.msg-row.grouped .msg-body { padding-right: 3.5rem; }
+/* My messages mirror: trailing edge is the LEFT corner; the stamp text rides
+   the bubble color, so it takes the bubble's text color, hushed by opacity. */
+.msg-row.grouped .msg-me .msg-body { padding-left: 3.5rem; padding-right: 13px; }
+.msg-row.grouped .msg-me .msg-stamp { right: auto; left: 8px; color: var(--bubble-me-text); opacity: 0.75; }
+.msg-stamp .msg-edited { margin: 0 5px 0 0; }
+
+/* An empty reactions strip (only the hover-revealed "+") must not hold rows
+   apart: it docks beside the balloon in the invisible-avatar gutter — still
+   inside .msg-row, so the row-hover reveal keeps working and there's no dead
+   wedge for the pointer to cross. This applies to EVERY row (#16): the head
+   of a same-author run is not .grouped, and a 31px ghost strip under it was
+   keeping the first two balloons of the run a header-line apart. Strips with
+   real pills (with-pills) stay in the flow below the bubble as usual. */
+.msg-row .reactions:not(.with-pills) { position: absolute; bottom: -2px; margin: 0; }
+.msg-row .msg-other .reactions:not(.with-pills) { right: 100%; }
+.msg-row .msg-me .reactions:not(.with-pills) { left: 100%; }
 
 /* ---------- "New messages" unread divider (#11) ---------- */
 /* WhatsApp-style: a full-width hairline with a centered pill, inserted by
@@ -483,7 +522,12 @@ button {
 :root[data-density="compact"] .messages { gap: 3px; padding: 12px 16px; }
 :root[data-density="compact"] .msg-body { padding: 5px 10px; }
 :root[data-density="compact"] .msg-avatar { width: 24px; height: 24px; }
-:root[data-density="compact"] .msg-row.grouped { margin-top: -2px; } /* 3px list gap → 1px */
+/* #16: grouped runs pack to the same ~2px between balloons in both densities;
+   the padded trailing zones below re-assert the stamp reserve (the padding
+   shorthand above otherwise ties on specificity and wins by source order). */
+:root[data-density="compact"] .msg-row.grouped { margin-top: -1px; } /* 3px list gap → 2px */
+:root[data-density="compact"] .msg-row.grouped .msg-body { padding-right: 3.5rem; }
+:root[data-density="compact"] .msg-row.grouped .msg-me .msg-body { padding-left: 3.5rem; padding-right: 10px; }
 :root[data-density="compact"] .channel-item { padding: 5px 12px; }
 :root[data-density="compact"] .item-avatar { width: 28px; height: 28px; }
 :root[data-density="compact"] .sidebar-header { padding: 10px 14px; }
