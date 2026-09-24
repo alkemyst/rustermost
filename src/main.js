@@ -1607,6 +1607,10 @@ function renderReactionsInto(container, postId) {
     pill.addEventListener("mouseleave", () => hideReactionTip(pill));
     container.appendChild(pill);
   }
+  // Marks strips holding real pills. An empty strip is just the hover-revealed
+  // "+"; inside a grouped run (#16) the CSS docks it beside the bubble instead
+  // of letting it stretch the gap between balloons.
+  container.classList.toggle("with-pills", container.childNodes.length > 0);
   const add = document.createElement("button");
   add.type = "button";
   add.className = "reaction-add";
@@ -1740,6 +1744,12 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edite
   }
   if (files && files.length) el.appendChild(attachmentsEl(files));
 
+  // The corner timestamp every bubble carries (#16): hidden on ungrouped rows,
+  // pinned onto the bubble's trailing bottom corner once the row goes .grouped
+  // (pure CSS flip — so the loadOlder boundary pairing can retag a rendered row
+  // with zero DOM surgery). Mirrors the meta line's time + edited marker.
+  if (ts) el.appendChild(stampEl(ts, !!edited));
+
   if (postId) {
     seedReactions(postId, reactions);
     const rx = document.createElement("div");
@@ -1772,6 +1782,16 @@ function formatTime(ts) {
   } catch {
     return "";
   }
+}
+
+// WhatsApp-style corner timestamp: "edited" tag (when already edited) followed
+// by the quiet clock. Hidden unless the row is .grouped — see styles.css.
+function stampEl(ts, edited) {
+  const stamp = document.createElement("div");
+  stamp.className = "msg-stamp";
+  if (edited) stamp.appendChild(editedMarkerEl());
+  stamp.appendChild(document.createTextNode(formatTime(ts)));
+  return stamp;
 }
 
 // ================= LIVE EVENTS =================
@@ -2832,13 +2852,16 @@ function editedMarkerEl() {
 }
 
 // Stamps the "edited" tag onto a rendered bubble; idempotent (the server
-// echoes our own edits back over the websocket).
+// echoes our own edits back over the websocket). Tags BOTH time reads — the
+// meta line (ungrouped look) and the corner stamp (grouped look, #16).
 function markEdited(postId) {
   const row = messagesEl.querySelector(`.msg-row[data-post-id="${CSS.escape(postId)}"]`);
   if (!row) return false;
   const meta = row.querySelector(".msg .msg-meta"); // bubbles always render a meta line; guard anyway
-  if (!meta || meta.querySelector(".msg-edited")) return false;
-  meta.appendChild(editedMarkerEl());
+  if (meta && !meta.querySelector(".msg-edited")) meta.appendChild(editedMarkerEl());
+  // The stamp leads with its marker ("edited · 12:34"), the meta trails with it.
+  const stamp = row.querySelector(".msg .msg-stamp");
+  if (stamp && !stamp.querySelector(".msg-edited")) stamp.insertBefore(editedMarkerEl(), stamp.firstChild);
   return true;
 }
 

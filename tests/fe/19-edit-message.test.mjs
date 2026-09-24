@@ -187,9 +187,12 @@ test("19: mm-post-edited repaints a rendered bubble in place", async () => {
   ok(w.q('.msg-row[data-post-id="p3"] .msg-edited'), "marker appended live");
 
   // Echo of our own edit: applying again must not duplicate the marker.
+  // Since #16 each bubble holds two time reads — the meta line and the hidden
+  // corner stamp — so the dedupe is asserted in each of them.
   w.emitEvent("mm-post-edited", { id: "p3", channel_id: "c1", message: "edited live", edit_at: 1728000100000 });
   await w.flush();
-  eq(w.qa('.msg-row[data-post-id="p3"] .msg-edited').length, 1, "marker applied at most once");
+  eq(w.qa('.msg-row[data-post-id="p3"] .msg-meta .msg-edited').length, 1, "meta marker applied at most once");
+  eq(w.qa('.msg-row[data-post-id="p3"] .msg-stamp .msg-edited').length, 1, "stamp marker applied at most once");
 
   // An edit for a channel that isn't open is ignored and must not crash.
   w.emitEvent("mm-post-edited", { id: "p3", channel_id: "c9", message: "elsewhere", edit_at: 1728000200000 });
