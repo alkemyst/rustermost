@@ -2574,7 +2574,12 @@ fileInput.addEventListener("change", () => {
 // a files fallback for webviews that don't expose pasted images via items.
 // WebKitGTK (Linux) fires paste with a completely EMPTY DataTransfer — in that
 // case the clipboard image is read directly from the OS via the
-// clipboard-manager plugin (see queueClipboardImage).
+// clipboard-manager plugin (see queueClipboardImage). Same remedy (#20
+// follow-up) when the transfer is NOT empty but textually useless: copying an
+// image in Firefox fills the clipboard with a text/html flavor (an <img>
+// fragment) beside the pixels — that item blocks the empty-transfer branch
+// and natively inserts "" into the composer. The rule: if the text the
+// clipboard would insert is empty, try the OS clipboard for an image.
 document.addEventListener("paste", (e) => {
   if (!state.activeId) return;
   const cd = e.clipboardData;
@@ -2594,11 +2599,11 @@ document.addEventListener("paste", (e) => {
     e.preventDefault();
     renderPendingFiles();
     composerInput.focus();
-  } else if (!cd || !(cd.items && cd.items.length)) {
-    // Empty DataTransfer: either the clipboard holds no image, or the webview
-    // hid it — ask the OS clipboard for an image just in case.
-    queueClipboardImage();
+    return;
   }
+  const plain = cd && cd.getData ? cd.getData("text/plain") : "";
+  if (cd && cd.items && cd.items.length && plain && plain.trim()) return; // real text → native insert
+  queueClipboardImage();
 });
 
 // Reads an image straight from the OS clipboard (bypasses the webview, which
