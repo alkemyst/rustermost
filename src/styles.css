@@ -402,14 +402,16 @@ button {
 .msg-row.grouped .msg-me .msg-stamp { right: auto; left: 8px; color: var(--bubble-me-text); opacity: 0.75; }
 .msg-stamp .msg-edited { margin: 0 5px 0 0; }
 
-/* An empty reactions strip (only the hover-revealed "+") must not hold a
-   grouped run apart: it docks beside the balloon in the invisible-avatar
-   gutter — still inside .msg-row, so the row-hover reveal keeps working and
-   there's no dead wedge for the pointer to cross. Pills (with-pills) keep
-   the strip in the flow below the bubble as usual. */
-.msg-row.grouped .reactions:not(.with-pills) { position: absolute; bottom: -2px; margin: 0; }
-.msg-row.grouped .msg-other .reactions:not(.with-pills) { right: 100%; }
-.msg-row.grouped .msg-me .reactions:not(.with-pills) { left: 100%; }
+/* An empty reactions strip (only the hover-revealed "+") must not hold rows
+   apart: it docks beside the balloon in the invisible-avatar gutter — still
+   inside .msg-row, so the row-hover reveal keeps working and there's no dead
+   wedge for the pointer to cross. This applies to EVERY row (#16): the head
+   of a same-author run is not .grouped, and a 31px ghost strip under it was
+   keeping the first two balloons of the run a header-line apart. Strips with
+   real pills (with-pills) stay in the flow below the bubble as usual. */
+.msg-row .reactions:not(.with-pills) { position: absolute; bottom: -2px; margin: 0; }
+.msg-row .msg-other .reactions:not(.with-pills) { right: 100%; }
+.msg-row .msg-me .reactions:not(.with-pills) { left: 100%; }
 
 /* ---------- "New messages" unread divider (#11) ---------- */
 /* WhatsApp-style: a full-width hairline with a centered pill, inserted by
