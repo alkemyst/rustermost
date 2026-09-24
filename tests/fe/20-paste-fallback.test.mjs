@@ -51,7 +51,7 @@ test("20: the reporter's case — Firefox image copy (text/html, no plain text) 
   }));
   await w.flush();
 
-  ok(readImageCalls >= 1, "the OS clipboard was probed for an image");
+  eq(readImageCalls, 1, "the OS clipboard was probed once for an image");
   ok(!ev.defaultPrevented, "native paste not blocked (inserts the empty text harmlessly)");
   eq(w.el("pending-files").classList.contains("hidden"), true, "no chip — the probe found no image");
 });
@@ -75,7 +75,7 @@ test("20: whitespace-only text still falls back (degenerate text flavors)", asyn
   paste(w, cd({ items: [{ kind: "string", type: "text/plain" }], getData: () => "   \n " }));
   await w.flush();
 
-  ok(readImageCalls >= 1, "whitespace is not worth blocking the image probe");
+  eq(readImageCalls, 1, "whitespace is not worth blocking the image probe");
 });
 
 test("20: empty DataTransfer (WebKitGTK hides the pixels) keeps probing the OS clipboard", async () => {
@@ -84,7 +84,18 @@ test("20: empty DataTransfer (WebKitGTK hides the pixels) keeps probing the OS c
   paste(w, cd());
   await w.flush();
 
-  ok(readImageCalls >= 1, "empty transfer → OS probe (pre-existing behavior)");
+  eq(readImageCalls, 1, "empty transfer → one OS probe (pre-existing behavior)");
+});
+
+test("20: no clipboardData at all (or no getData on it) still probes, never crashes", async () => {
+  const w = await bootPaste();
+
+  paste(w, null);
+  await w.flush();
+  paste(w, { items: [], files: [] }); // no getData method on this one
+  await w.flush();
+
+  eq(readImageCalls, 2, "one probe per degenerate paste event");
 });
 
 test("20: pasted FILE items queue the attachment, prevent native insert, skip the probe", async () => {
