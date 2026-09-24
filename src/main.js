@@ -1420,7 +1420,8 @@ function renderMarkdown(text) {
 // 333×30 banner must qualify, a multi-MB photo never may). Two probes:
 const SMALL_IMAGE_MAX_DIM = 480; // px on the long edge, once FileInfo carries width/height
 // …until then the byte size stands in: anything under 256 KiB is cheap enough
-// to pull whole (and the disk cache makes the later lightbox re-read free).
+// to pull whole (get_file is NOT disk-cached like thumbnails are — the cap is
+// also what keeps the per-open lightbox re-fetch negligible).
 const SMALL_IMAGE_MAX_BYTES = 256 * 1024;
 
 function isSmallImage(info) {

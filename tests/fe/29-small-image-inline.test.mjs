@@ -5,7 +5,8 @@
 // Covers the two-tier "small" probe — pixel dims once FileInfo carries
 // width/height (future backend field), byte size until then — plus the large
 // images staying on the thumbnail path, non-image files staying chips, the
-// get_file → thumbnail fallback, and click → lightbox staying uniform.
+// get_file → thumbnail → named-chip fallback chain end to end, and click →
+// lightbox staying uniform.
 
 import { boot, test, ok, eq } from "../harness.mjs";
 
@@ -27,10 +28,11 @@ const INFOS = {
   f6: { id: "f6", name: "icon.png", size: 10 * 1024, mime_type: "image/png", width: 64, height: 64 }, // small, but get_file fails
   f7: { id: "f7", name: "edge-ok.png", size: 900 * 1024, mime_type: "image/png", width: 480, height: 479 }, // dims on the boundary
   f8: { id: "f8", name: "edge-wide.png", size: 900, mime_type: "image/png", width: 481, height: 10 }, // 1px past the boundary
+  f9: { id: "f9", name: "broken.png", size: 5 * 1024, mime_type: "image/png", width: 100, height: 100 }, // small, but EVERY fetch fails
 };
 
 const post = (id, fileIds) => ({ id, user_id: "u2", channel_id: "c1", message: "", create_at: 1728000000000, file_ids: fileIds });
-const POSTS = { c1: [["p1", "f1"], ["p2", "f2"], ["p3", "f3"], ["p4", "f4"], ["p5", "f5"], ["p6", "f6"], ["p7", "f7"], ["p8", "f8"]].map(([p, f]) => post(p, [f])) };
+const POSTS = { c1: [["p1", "f1"], ["p2", "f2"], ["p3", "f3"], ["p4", "f4"], ["p5", "f5"], ["p6", "f6"], ["p7", "f7"], ["p8", "f8"], ["p9", "f9"]].map(([p, f]) => post(p, [f])) };
 
 const attOf = (w, p) => w.q(`.msg-row[data-post-id="${p}"] .attachment`);
 const thumbAsked = (w, f) => w.invoked("get_file_thumbnail").some((c) => c.args.fileId === f);
@@ -40,8 +42,8 @@ async function bootFiles() {
   const w = await boot({
     handlers: {
       get_file_info: async ({ fileId }) => { if (!INFOS[fileId]) throw new Error("unknown file " + fileId); return INFOS[fileId]; },
-      get_file_thumbnail: async ({ fileId }) => THUMB + fileId,
-      get_file: async ({ fileId }) => { if (fileId === "f6") throw new Error("read blew up"); return FULL + fileId; },
+      get_file_thumbnail: async ({ fileId }) => { if (fileId === "f9") throw new Error("thumb blew up too"); return THUMB + fileId; },
+      get_file: async ({ fileId }) => { if (fileId === "f6" || fileId === "f9") throw new Error("read blew up"); return FULL + fileId; },
     },
     channels: CHANNELS, posts: POSTS, users: USERS, me: ME,
   });
@@ -118,4 +120,16 @@ test("29: a failing full read falls back to the thumbnail, never breaks renderin
   const att = attOf(w, "p6");
   ok(att.classList.contains("image"), "still rendered as an image");
   eq(w.q("img", att).src, THUMB + "f6", "inline img holds the thumbnail after the failure");
+});
+
+test("29: full read AND thumbnail both fail → the named chip is the last resort", async () => {
+  const w = await bootFiles();
+
+  ok(fileAsked(w, "f9").length >= 1, "f9: full read attempted first (small image)");
+  ok(thumbAsked(w, "f9"), "f9: thumbnail attempted as the fallback");
+  const att = attOf(w, "p9");
+  ok(att.classList.contains("file-chip"), "degrades to the chip");
+  ok(!att.classList.contains("image"), "not an image attachment anymore");
+  ok(!w.q("img", att), "no half-loaded img left behind");
+  ok(att.textContent.includes("broken.png"), "chip still names the file");
 });
