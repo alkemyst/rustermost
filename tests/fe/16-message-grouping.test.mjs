@@ -1,12 +1,13 @@
 // tests/fe/16-message-grouping.test.mjs — issue #16: more compact messages.
 //
-// Consecutive messages from the same author within 5 minutes collapse into a
-// group (WhatsApp/Mattermost-style): the follow-up bubbles carry .grouped,
-// which hides the repeated avatar (visibility — the gutter and the text's
-// flush edge stay) and the sender name, and packs the run tighter. These
-// tests cover every render path the grouping must survive: the full repaint
-// (including the users-resolved second paint), live mm-post appends, the
-// loadOlder prepend (both directions of the boundary pairing), my own
+// Consecutive messages from the same author collapse into a group
+// (WhatsApp/Mattermost-style) — no time window ("mai ripetere nome e icona"),
+// same author + consecutive is all it takes. The follow-up bubbles carry
+// .grouped, which hides the repeated avatar (visibility — the gutter and the
+// text's flush edge stay) and the sender name, and packs the run tighter.
+// These tests cover every render path the grouping must survive: the full
+// repaint (including the users-resolved second paint), live mm-post appends,
+// the loadOlder prepend (both directions of the boundary pairing), my own
 // messages, and the compact density.
 
 import { boot, test, ok, eq } from "../harness.mjs";
@@ -48,22 +49,25 @@ async function bootWith(posts, handlers = {}) {
 const rowOf = (w, id) => w.q(`.msg-row[data-post-id="${id}"]`);
 const isGrouped = (w, id) => rowOf(w, id).classList.contains("grouped");
 
-test("16: a quick same-author run groups; a different author or a >5min gap breaks it", async () => {
+test("16: consecutive same-author messages group regardless of the gap; a different author breaks the run", async () => {
+  // Was: "…or a >5min gap breaks it" — the 5-minute window is gone (user
+  // feedback: name and avatar must never repeat while the same person keeps
+  // the floor), so the long-gap cases now assert GROUPING, not breaking.
   const w = await bootWith([
     post("p1", "u2", "first", T0),
     post("p2", "u2", "second, 1 min later", T0 + 1 * MIN),
-    post("p3", "u2", "third, 1 min later still", T0 + 2 * MIN),
-    post("p4", "u3", "bob jumps in", T0 + 3 * MIN),
-    post("p5", "u3", "bob again", T0 + 4 * MIN),
-    post("p6", "u3", "bob after a 6 min pause", T0 + 10 * MIN),
+    post("p3", "u2", "third, 40 min later — far past the old 5 min window", T0 + 41 * MIN),
+    post("p4", "u3", "bob jumps in", T0 + 42 * MIN),
+    post("p5", "u3", "bob again", T0 + 43 * MIN),
+    post("p6", "u3", "bob hours later, same author again", T0 + 5 * 60 * MIN),
   ]);
 
   ok(!isGrouped(w, "p1"), "run leader shows the full header");
   ok(isGrouped(w, "p2"), "same author 1 min later groups");
-  ok(isGrouped(w, "p3"), "the run continues");
+  ok(isGrouped(w, "p3"), "a 40 min gap still groups — no time window anymore");
   ok(!isGrouped(w, "p4"), "a different author breaks the run");
   ok(isGrouped(w, "p5"), "bob's follow-up groups with bob's first");
-  ok(!isGrouped(w, "p6"), "a 6 min gap exceeds the 5 min window → fresh header");
+  ok(isGrouped(w, "p6"), "even hours later the same author keeps grouping");
 
   // The header is only *visually* collapsed: gutter + small timestamp remain.
   for (const id of ["p1", "p2", "p3"]) {
@@ -94,14 +98,14 @@ test("16: grouping survives the resolveUsers repaint, and my own runs group too"
 });
 
 test("16: a live mm-post from the last author appends grouped; another author restarts", async () => {
-  // Live bubbles stamp `ts: Date.now()`, so the last history post must be
-  // fresh for the run to continue. bob appears once in the older history so
-  // openChannel's resolveUsers learns his id — a live sender we've never
-  // resolved intentionally never groups (one header too many beats one too
-  // few).
+  // With no time window, a live bubble (ts: Date.now()) groups onto ANY
+  // same-author history post — these are deliberately days old (fixed T0).
+  // bob appears once in the history so openChannel's resolveUsers learns his
+  // id — a live sender we've never resolved intentionally never groups (one
+  // header too many beats one too few).
   const w = await bootWith([
-    post("p0", "u3", "bob was here earlier", Date.now() - 10 * MIN),
-    post("p1", "u2", "just now", Date.now() - 30 * 1000),
+    post("p0", "u3", "bob was here earlier", T0),
+    post("p1", "u2", "anna, also old history", T0 + 1 * MIN),
   ]);
 
   w.emitEvent("mm-post", { id: "live1", channel_id: "c1", sender: "anna", message: "anna live 1" });
@@ -137,8 +141,8 @@ test("16: a live message from a never-resolved sender falls back to a full heade
 
 test("16: loadOlder groups within the new page and regroups the boundary bubble", async () => {
   // A full first page (PAGE_SIZE = 30) leaves pageMore open; the older page
-  // ends with the same author as the current page's first bubble, inside the
-  // window — the boundary bubble must flip to grouped on prepend.
+  // ends with the same author as the current page's first bubble — the
+  // boundary bubble must flip to grouped on prepend.
   const latest = [post("f1", "u2", "first of the latest page", T0)];
   for (let i = 2; i <= 30; i++) latest.push(post("f" + i, "u3", "noise " + i, T0 + (i - 1) * MIN));
   const older = [post("o1", "u2", "older one", T0 - 2 * MIN), post("o2", "u2", "older two", T0 - 1 * MIN)];

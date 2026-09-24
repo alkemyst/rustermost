@@ -146,12 +146,14 @@ const state = {
 
 const PAGE_SIZE = 30; // matches the backend's per_page
 
-// Issue #16: consecutive messages from the same author within a short window
-// collapse into a group — follow-up bubbles hide the repeated avatar (the
-// gutter stays, so the text keeps its alignment) and sender name, and pack
-// tighter (see .grouped in styles.css). 5 minutes mirrors the batching feel
-// of the native client and WhatsApp.
-const GROUP_WINDOW_MS = 5 * 60 * 1000;
+// Issue #16: consecutive messages from the same author collapse into a group
+// — follow-up bubbles hide the repeated avatar (the gutter stays, so the text
+// keeps its alignment) and sender name, and pack tighter (see .grouped in
+// styles.css). There is deliberately NO time window (#16 follow-up: "mai
+// ripetere nome e icona se la persona parla due volte di fila") — same author
+// + consecutive is all it takes, however long the gap. A group still breaks
+// on a different author, the unread divider or an ephemeral row (see
+// shouldGroupWith).
 
 // ---------- element refs ----------
 const $ = (id) => document.getElementById(id);
@@ -1052,15 +1054,17 @@ function unreadDividerEl() {
 // Is a new bubble a direct continuation of `prevRow` (the bubble rendered
 // right before it)? bubbleEl stamps every row with data-author / data-ts, so
 // the same helper serves the full repaint, live appends and the loadOlder
-// boundary fix-up. An unknown author (live event for a user we haven't
-// resolved yet) never groups — showing one header too many beats hiding one.
+// boundary fix-up. No time window: the run only breaks on a different author
+// or a non-message row (divider, ephemeral reply) — the monotonic guard just
+// rejects out-of-order timestamps. An unknown author (live event for a user
+// we haven't resolved yet) never groups — showing one header too many beats
+// hiding one.
 function shouldGroupWith(prevRow, uid, ts) {
   if (!prevRow || !uid || !ts) return false;
   const prevTs = Number(prevRow.dataset.ts);
   return prevRow.dataset.author === uid
     && Number.isFinite(prevTs)
-    && ts - prevTs >= 0
-    && ts - prevTs < GROUP_WINDOW_MS;
+    && ts - prevTs >= 0; // monotonic — the gap itself may be arbitrarily long
 }
 
 // The last rendered message bubble, skipping any non-message trailing nodes
@@ -1777,9 +1781,10 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edite
   if (files && files.length) el.appendChild(attachmentsEl(files));
 
   // The corner timestamp every bubble carries (#16): hidden on ungrouped rows,
-  // pinned onto the bubble's trailing bottom corner once the row goes .grouped
-  // (pure CSS flip — so the loadOlder boundary pairing can retag a rendered row
-  // with zero DOM surgery). Mirrors the meta line's time + edited marker.
+  // docked just OUTSIDE the balloon's trailing bottom edge once the row goes
+  // .grouped (pure CSS flip — so the loadOlder boundary pairing can retag a
+  // rendered row with zero DOM surgery). Mirrors the meta line's time + edited
+  // marker.
   if (ts) el.appendChild(stampEl(ts, !!edited));
 
   if (postId) {
@@ -1807,17 +1812,32 @@ function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// The one time read of the app: feeds BOTH the meta line and the corner
+// stamp (#16), so the two can never disagree. Messages from today get the
+// bare clock ("14:22"); anything older gets a short date prefix
+// ("23/09 14:22", locale-shaped) — with gap-less grouping a run can now span
+// midnight, and a lone "14:22" on yesterday's bubble is as misleading as a
+// missing one was before.
 function formatTime(ts) {
   if (!ts) return "";
   try {
-    return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const d = new Date(ts);
+    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const now = new Date();
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate();
+    if (sameDay) return time;
+    return d.toLocaleDateString([], { day: "2-digit", month: "2-digit" }) + " " + time;
   } catch {
     return "";
   }
 }
 
-// WhatsApp-style corner timestamp: "edited" tag (when already edited) followed
-// by the quiet clock. Hidden unless the row is .grouped — see styles.css.
+// The grouped-row clock (#16): "edited" tag (when already edited) followed by
+// the time. Hidden unless the row is .grouped, and then docked outside the
+// balloon's trailing edge, on the chat background — see styles.css.
 function stampEl(ts, edited) {
   const stamp = document.createElement("div");
   stamp.className = "msg-stamp";
@@ -2554,7 +2574,12 @@ fileInput.addEventListener("change", () => {
 // a files fallback for webviews that don't expose pasted images via items.
 // WebKitGTK (Linux) fires paste with a completely EMPTY DataTransfer — in that
 // case the clipboard image is read directly from the OS via the
-// clipboard-manager plugin (see queueClipboardImage).
+// clipboard-manager plugin (see queueClipboardImage). Same remedy (#20
+// follow-up) when the transfer is NOT empty but textually useless: copying an
+// image in Firefox fills the clipboard with a text/html flavor (an <img>
+// fragment) beside the pixels — that item blocks the empty-transfer branch
+// and natively inserts "" into the composer. The rule: if the text the
+// clipboard would insert is empty, try the OS clipboard for an image.
 document.addEventListener("paste", (e) => {
   if (!state.activeId) return;
   const cd = e.clipboardData;
@@ -2574,11 +2599,11 @@ document.addEventListener("paste", (e) => {
     e.preventDefault();
     renderPendingFiles();
     composerInput.focus();
-  } else if (!cd || !(cd.items && cd.items.length)) {
-    // Empty DataTransfer: either the clipboard holds no image, or the webview
-    // hid it — ask the OS clipboard for an image just in case.
-    queueClipboardImage();
+    return;
   }
+  const plain = cd && cd.getData ? cd.getData("text/plain") : "";
+  if (cd && cd.items && cd.items.length && plain && plain.trim()) return; // real text → native insert
+  queueClipboardImage();
 });
 
 // Reads an image straight from the OS clipboard (bypasses the webview, which
