@@ -6,6 +6,8 @@
 //  - every bubble carries a .msg-stamp node (time, then "edited" when apt)
 //    next to the regular .msg-meta line, so the .grouped flip never needs a
 //    DOM rebuild — including the loadOlder boundary retagging;
+//  - the stamp is a direct child of .msg (the positioned column the CSS
+//    anchors it to), a sibling of — never inside — .msg-body;
 //  - an empty reactions strip is tagged with-pills=false so grouped CSS can
 //    dock the hover "+" beside the bubble instead of stretching the run;
 //  - edited markers land in both time reads (meta line and corner stamp).
@@ -54,6 +56,15 @@ test("16: every bubble carries a corner stamp mirroring the meta time", async ()
     ok(metaOf(w, id).textContent.includes(stamp.textContent), `${id}: stamp time == meta time`);
     ok(!stamp.querySelector(".msg-sender"), `${id}: the stamp never carries the sender name`);
   }
+  // Smart format (#16 follow-up): T0 is inherently "another day" relative to
+  // the real now, so BOTH time reads must carry the short date — one helper
+  // (formatTime) feeds meta and stamp, they can never disagree.
+  const day = new Date(T0).toLocaleDateString([], { day: "2-digit", month: "2-digit" });
+  const clock = new Date(T0).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  ok(stampOf(w, "p1").textContent.includes(day) && stampOf(w, "p1").textContent.includes(clock),
+    "old stamp reads 'date time'");
+  ok(metaOf(w, "p1").textContent.includes(day) && metaOf(w, "p1").textContent.includes(clock),
+    "old meta reads 'date time' too");
   // The stamp lives in the .msg column as a sibling, NOT inside .msg-body —
   // markdown/table renderings keep their body child structure untouched.
   const body = w.q(".msg-body", rowOf(w, "p2"));
@@ -151,4 +162,15 @@ test("16: live grouped appends arrive with the stamp already on board", async ()
   const stamp = stampOf(w, "live1");
   ok(stamp && stamp.textContent.trim().length > 0, "live bubble carries a populated stamp");
   ok(metaOf(w, "live1").textContent.includes(stamp.textContent), "stamp mirrors the meta time");
+});
+
+test("16: same-day messages read time only, in both time reads", async () => {
+  // The smart format (#16 follow-up) cuts both ways: old posts earn a date
+  // (asserted above via the fixed T0 posts), today's stay a bare clock.
+  const ts = Date.now() - 60 * 1000;
+  const w = await bootWith([post("t1", "u2", "today", ts)]);
+
+  const expected = new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  eq(metaOf(w, "t1").textContent.trim(), expected, "meta is the bare clock, no date prefix");
+  eq(stampOf(w, "t1").textContent.trim(), expected, "stamp is the bare clock too");
 });
