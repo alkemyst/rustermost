@@ -358,16 +358,22 @@ button {
 .msg { min-width: 0; display: flex; flex-direction: column; position: relative; }
 .msg-me { align-items: flex-end; }
 .msg-meta { font-size: 0.79rem; line-height: 1.3; color: var(--text-faint); margin: 0 4px 3px; }
+/* The meta line shows only the sender name: the time lives in the stamp
+   beside the balloon on every row (see .msg-stamp). Rows without a sender
+   (my own) have nothing left to show, so the line and the avatar offset go. */
+.msg-meta-time, .msg-sep, .msg-meta .msg-edited { display: none; }
+.msg-row.no-sender .msg-meta { display: none; }
+.msg-row.no-sender .msg-avatar { margin-top: 0; }
 .msg-body {
   padding: 9px 13px;
-  border-radius: 14px;
+  border-radius: 4px; /* same small curvature on all four corners */
   line-height: 1.4;
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-wrap: anywhere;
 }
-.msg-other .msg-body { background: var(--bubble-other); border-bottom-left-radius: 4px; }
-.msg-me .msg-body { background: var(--bubble-me); color: var(--bubble-me-text); border-bottom-right-radius: 4px; }
+.msg-other .msg-body { background: var(--bubble-other); }
+.msg-me .msg-body { background: var(--bubble-me); color: var(--bubble-me-text); }
 
 /* ---------- grouped consecutive messages (#16) ---------- */
 /* A run of consecutive same-author messages — however long the gaps; there
@@ -395,16 +401,18 @@ button {
    stamp (a bare clock, or short date + clock) is ~70px at most — well inside
    the ≥20% gutter it leans into. */
 .msg-stamp {
-  display: none;
+  display: block;
+  position: absolute;
+  bottom: 3px;
+  left: calc(100% + 6px);
   font-size: 0.79rem;
   line-height: 1;
   color: var(--text-faint);
   white-space: nowrap;
   user-select: none;
 }
-.msg-row.grouped .msg-stamp { display: block; position: absolute; bottom: 3px; left: calc(100% + 6px); }
 /* My messages mirror: the trailing edge is the LEFT side of the balloon. */
-.msg-row.grouped .msg-me .msg-stamp { left: auto; right: calc(100% + 6px); }
+.msg-me .msg-stamp { left: auto; right: calc(100% + 6px); }
 .msg-stamp .msg-edited { margin: 0 5px 0 0; }
 
 /* An empty reactions strip (only the hover-revealed "+") must not hold rows

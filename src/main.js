@@ -1742,7 +1742,7 @@ window.addEventListener("blur", closeMsgMenu);
 
 function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edited, grouped }) {
   const row = document.createElement("div");
-  row.className = "msg-row" + (mine ? " mine" : "") + (grouped ? " grouped" : "");
+  row.className = "msg-row" + (mine ? " mine" : "") + (grouped ? " grouped" : "") + (sender ? "" : " no-sender");
   if (postId) row.dataset.postId = postId; // how edits/locators find this bubble
   // Grouping glue (#16): who sent this bubble and when. NB: deliberately NOT
   // data-uid — that attribute signals "paint the avatar into this element"
@@ -1762,13 +1762,23 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edite
     // (.msg-row.grouped .msg-sender) while keeping the small timestamp —
     // that way a bubble can flip in and out of a group (loadOlder boundary
     // fix-up) without rebuilding any text.
+    // The time (and its separator) get spans too: the visible clock is the
+    // stamp beside the balloon on every row, so CSS hides these — the meta
+    // line shows just the sender name heading a run.
     if (sender) {
       const who = document.createElement("span");
       who.className = "msg-sender";
-      who.textContent = sender + " · ";
+      who.textContent = sender;
+      const sep = document.createElement("span");
+      sep.className = "msg-sep";
+      sep.textContent = " · ";
+      who.appendChild(sep);
       meta.appendChild(who);
     }
-    meta.appendChild(document.createTextNode(formatTime(ts)));
+    const time = document.createElement("span");
+    time.className = "msg-meta-time";
+    time.textContent = formatTime(ts);
+    meta.appendChild(time);
     if (edited) meta.appendChild(editedMarkerEl()); // history posts carrying edit_at
     el.appendChild(meta);
   }
@@ -1780,11 +1790,9 @@ function bubbleEl({ mine, uid, sender, text, ts, files, postId, reactions, edite
   }
   if (files && files.length) el.appendChild(attachmentsEl(files));
 
-  // The corner timestamp every bubble carries (#16): hidden on ungrouped rows,
-  // docked just OUTSIDE the balloon's trailing bottom edge once the row goes
-  // .grouped (pure CSS flip — so the loadOlder boundary pairing can retag a
-  // rendered row with zero DOM surgery). Mirrors the meta line's time + edited
-  // marker.
+  // The timestamp every bubble shows (#16), grouped or not: docked just
+  // OUTSIDE the balloon's trailing bottom edge. Mirrors the meta line's
+  // (hidden) time + edited marker.
   if (ts) el.appendChild(stampEl(ts, !!edited));
 
   if (postId) {
@@ -1835,9 +1843,9 @@ function formatTime(ts) {
   }
 }
 
-// The grouped-row clock (#16): "edited" tag (when already edited) followed by
-// the time. Hidden unless the row is .grouped, and then docked outside the
-// balloon's trailing edge, on the chat background — see styles.css.
+// The bubble clock (#16): "edited" tag (when already edited) followed by the
+// time, docked outside the balloon's trailing edge on every row, on the chat
+// background — see styles.css.
 function stampEl(ts, edited) {
   const stamp = document.createElement("div");
   stamp.className = "msg-stamp";
