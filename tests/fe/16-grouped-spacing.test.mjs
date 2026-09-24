@@ -171,6 +171,8 @@ test("16: same-day messages read time only, in both time reads", async () => {
   const w = await bootWith([post("t1", "u2", "today", ts)]);
 
   const expected = new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  eq(metaOf(w, "t1").textContent.trim(), expected, "meta is the bare clock, no date prefix");
-  eq(stampOf(w, "t1").textContent.trim(), expected, "stamp is the bare clock too");
+  const dateBit = new Date(ts).toLocaleDateString([], { day: "2-digit", month: "2-digit" });
+  ok(metaOf(w, "t1").textContent.includes(expected), "meta carries the clock (sender prefix aside)");
+  ok(!metaOf(w, "t1").textContent.includes(dateBit), "meta has NO date for a same-day message");
+  eq(stampOf(w, "t1").textContent.trim(), expected, "stamp is the bare clock, no date prefix");
 });
