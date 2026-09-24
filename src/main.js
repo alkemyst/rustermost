@@ -1415,6 +1415,21 @@ function renderMarkdown(text) {
 }
 
 // ---------- attachments ----------
+// #29: an already-small image gets inlined at full fidelity — the thumbnail
+// roundtrip only pays off when it actually shrinks something (the reporter's
+// 333×30 banner must qualify, a multi-MB photo never may). Two probes:
+const SMALL_IMAGE_MAX_DIM = 480; // px on the long edge, once FileInfo carries width/height
+// …until then the byte size stands in: anything under 256 KiB is cheap enough
+// to pull whole (and the disk cache makes the later lightbox re-read free).
+const SMALL_IMAGE_MAX_BYTES = 256 * 1024;
+
+function isSmallImage(info) {
+  const w = Number(info.width);
+  const h = Number(info.height);
+  if (w > 0 && h > 0) return Math.max(w, h) <= SMALL_IMAGE_MAX_DIM;
+  return typeof info.size === "number" && info.size < SMALL_IMAGE_MAX_BYTES;
+}
+
 async function fileInfo(id) {
   if (state.fileInfos[id]) return state.fileInfos[id];
   const info = await invoke("get_file_info", { fileId: id });
@@ -1442,8 +1457,9 @@ function attachmentsEl(fileIds) {
   return wrap;
 }
 
-// Fill an attachment placeholder: image thumbnail (click = full view) or a
-// name+size chip. Degrades to a plain tag until the file commands exist.
+// Fill an attachment placeholder: image (thumbnail, or the full image when
+// small — see #29) with click = full view, or a name+size chip. Degrades to a
+// plain tag until the file commands exist.
 async function hydrateAttachment(el, id) {
   if (!state.fileLookupEnabled) { el.textContent = "📎 attachment"; return; }
   let info;
@@ -1461,20 +1477,35 @@ async function hydrateAttachment(el, id) {
     el.textContent = `📎 ${info.name}` + (info.size ? ` · ${formatSize(info.size)}` : "");
     return;
   }
+  // #29: small enough to show as-is — skip the miniature, the inline img gets
+  // the full data URL. Click still opens the lightbox (uniform behavior).
+  if (isSmallImage(info)) {
+    try {
+      renderImageAttachment(el, id, info, await invoke("get_file", { fileId: id, mime: info.mime_type }));
+      return;
+    } catch (_) {
+      // full read failed — fall back to the thumbnail path below
+    }
+  }
   try {
-    const thumb = await invoke("get_file_thumbnail", { fileId: id });
-    el.classList.add("image");
-    el.textContent = "";
-    const img = document.createElement("img");
-    img.src = thumb;
-    img.alt = info.name;
-    el.appendChild(img);
-    el.addEventListener("click", () => openLightbox(id, info));
+    renderImageAttachment(el, id, info, await invoke("get_file_thumbnail", { fileId: id }));
   } catch (_) {
     // thumbnail failed (e.g. command missing) — at least name the file
     el.classList.add("file-chip");
     el.textContent = `🖼️ ${info.name}`;
   }
+}
+
+// Inline image + click → lightbox; shared by the thumbnail path and #29's
+// full-fidelity small-image path.
+function renderImageAttachment(el, id, info, src) {
+  el.classList.add("image");
+  el.textContent = "";
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = info.name;
+  el.appendChild(img);
+  el.addEventListener("click", () => openLightbox(id, info));
 }
 
 // Full-size image over everything; click anywhere or Esc to close.
